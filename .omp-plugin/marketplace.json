@@ -1,0 +1,15 @@
+{
+  "name": "omp-freepi-bridge",
+  "description": "FreePi as an OMP model provider: free models only, with ordered fallback.",
+  "owner": {
+    "name": "yayayapluto"
+  },
+  "plugins": [
+    {
+      "name": "omp-freepi-bridge",
+      "source": "./",
+      "version": "0.1.1",
+      "description": "Plug a FreePi account into OMP as the `freepi` provider. Spawns the freepi-bridge daemon, exposes only credit-free models, and reroutes premium ids."
+    }
+  ]
+}
