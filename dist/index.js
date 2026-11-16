@@ -22,7 +22,7 @@ var STATE_DIR = path.join(os.homedir(), ".freepi-bridge");
 var STATE_FILE = path.join(STATE_DIR, "state.json");
 var CONFIG_ENV = path.join(STATE_DIR, "config.env");
 var MODELS_CACHE_FILE = path.join(STATE_DIR, "pi-models.json");
-var BIN_DIR = path.join(os.homedir(), ".pi-freepi-bridge", "bin");
+var BIN_DIR = path.join(os.homedir(), ".omp-freepi-bridge", "bin");
 var CREDENTIALS_FILE = path.join(os.homedir(), ".free-pi", "agent", "credentials.json");
 var MODEL_BASE = {
   api: "openai-completions",

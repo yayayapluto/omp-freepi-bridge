@@ -6,7 +6,7 @@
  * your FreePi account without an API key.
  *
  * Cross-platform: finds freepi-bridge on PATH / known install dirs, else
- * downloads the matching release asset from GitHub into ~/.pi-freepi-bridge/bin.
+ * downloads the matching release asset from GitHub into ~/.omp-freepi-bridge/bin.
  *
  * Usage (inside pi/OMP):
  *   /freepi              → daemon & provider status
@@ -42,7 +42,7 @@ const CONFIG_ENV = path.join(STATE_DIR, "config.env");
 const MODELS_CACHE_FILE = path.join(STATE_DIR, "pi-models.json");
 
 // Extension-managed binary (only used if freepi-bridge isn't already available).
-const BIN_DIR = path.join(os.homedir(), ".pi-freepi-bridge", "bin");
+const BIN_DIR = path.join(os.homedir(), ".omp-freepi-bridge", "bin");
 
 // FreePi CLI credential file (written once by `npx free-pi-cli@latest`).
 const CREDENTIALS_FILE = path.join(os.homedir(), ".free-pi", "agent", "credentials.json");
