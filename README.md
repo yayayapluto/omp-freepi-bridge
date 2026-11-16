@@ -57,6 +57,36 @@ On first use the extension will:
 
 List what is available: `/freepi models`
 
+### Only free models are registered
+
+Some FreePi models are premium-credit only and fail with:
+
+```
+403 At capacity for free users. Available with premium credits: /buy-credits
+```
+
+`/v1/models` from the bridge does not carry the tier flag, so the extension reads
+`https://api.freepi.ai/client-version` (authenticated with your token), keeps only
+entries where `free === true`, and caches them in `~/.freepi-bridge/free-models.json`.
+
+pi/OMP re-discovers models from the provider endpoint, so filtering the registered
+list is not enough. The extension therefore puts a small local proxy between OMP
+and the daemon:
+
+- `GET /v1/models` → only the free models, in priority order
+- `POST /v1/chat/completions` → a premium model id is rerouted to the best free model
+- upstream `403`/`429`/`5xx` → retried with the next free model
+- the model actually used is returned in the `x-freepi-model` response header
+
+Fallback chain (best → least), also used when tier lookup is unavailable:
+
+1. `particle`
+2. `deepseek-v4.1-flash`
+3. `glm-5.3-flash`
+4. `deepseek-v4-flash`
+
+To expose everything anyway (e.g. you bought credits), set `FREEPI_FREE_ONLY=0`.
+
 ---
 
 ## Commands
@@ -85,6 +115,8 @@ List what is available: `/freepi models`
 | `FREEPI_BRIDGE_BIN` | unset | Explicit path to the `freepi-bridge` binary |
 | `FREEPI_BRIDGE_PORT` | `8787` | Daemon listen port |
 | `FREEPI_AUTO_AD` | `1` | Auto-report ads (`0` disables; open `/ads` manually) |
+| `FREEPI_FREE_ONLY` | `1` | Register only credit-free models (`0` shows all) |
+| `FREEPI_BASE_URL` | `https://api.freepi.ai` | Upstream FreePi API used for tier lookup |
 
 ---
 
@@ -96,6 +128,7 @@ List what is available: `/freepi models`
 | `401` / login errors | run `npx free-pi-cli@latest`, or set `FREEPI_TOKEN` |
 | Port already in use | set `FREEPI_BRIDGE_PORT` |
 | `403 ads_required` | set `FREEPI_AUTO_AD=0` and open the `/ads` page the bridge prints |
+| `403 At capacity for free users` | you picked a premium model; run `/freepi refresh-models` and use a free one |
 | Daemon stuck | `/freepi restart`, logs via `/freepi logs` |
 
 ---
