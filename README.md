@@ -1,134 +1,137 @@
-# pi-freepi-bridge
+# freepi-bridge OMP extension
 
-Free OpenAI-compatible model provider for pi via the [freepi-bridge](https://github.com/ihsan-ramadhan/freepi-bridge) local daemon.
+Plug your **FreePi** account into pi/OMP as the `freepi` model provider.
 
-Registers your FreePi account as the `freepi` provider, so any pi/OMP session can use your FreePi account without an API key.
-
-## Quick Start
-
-### 1. Install (once)
-
-```bash
-omp plugin install /path/to/pi-freepi-bridge
-```
-
-### 2. Ensure your FreePi token is set (one-time)
-
-The extension checks these sources in order:
-
-| Source | How |
-|---|---|
-| `FREEPI_TOKEN` env var | `set FREEPI_TOKEN=eyJ... && omp launch` |
-| `~/.free-pi/agent/credentials.json` | Run `npx free-pi-cli@latest` once (GitHub login, then quit) |
-| `~/.freepi-bridge/config.env` | Edit this file and set `FREEPI_TOKEN=...` |
-
-If no token is found, the extension warns on startup: `/freepi token`.
-
-### 3. Start the daemon (auto on first use)
-
-The extension auto-spawns a `freepi-bridge` instance on `127.0.0.1:8787` the first time you use it, or you can pre-start:
-
-```bash
-/freepi start
-```
-
-### 4. Use a model
-
-```bash
-omp launch --model freepi/particle -p "say hi"
-```
-
-Available model ids: `particle`, `deepseek-v4.1-flash`, `glm-5.3-flash`, `deepseek-v4-flash`, `abliterated-large-flash`, `abliterated-large-v2`, `mimo-v2.6-flash`, `kimi-k3.1-pro`, `solar-pro-4`, `uncensored-1.2`, plus any models your FreePi account serves.
-
-### 5. Commands
-
-| Command | Does |
-|---|---|
-| `/freepi status` | daemon & provider status + model count |
-| `/freepi token` | show token source + sign-in guide |
-| `/freepi doctor` | bridge health + token check |
-| `/freepi models` | list registered model ids |
-| `/freepi refresh-models` | re-fetch `/v1/models` and re-register |
-| `/freepi start` | start / restart the daemon |
-| `/freepi stop` | stop the daemon |
-| `/freepi restart` | stop + start the daemon |
-| `/freepi ads` | print the FreePi ad page URL |
-| `/freepi logs` | tail bridge.log |
-| `/freepi install` | ensure freepi-bridge binary is installed |
-
-Run any of: `/freepi help` or `/freepi <command>`.
-
-### 6. Manual freepi-bridge binary install (optional)
-
-If the extension cannot find `freepi-bridge` on PATH, run:
-
-```bash
-/freepi install
-```
-
-This downloads the matching release from GitHub (`ihsan-ramadhan/freepi-bridge`) and places it in `~/.pi-freepi-bridge/bin/` with checksum verification.
-
-### 7. Linux/macOS / Windows notes
-
-- **Linux/macOS:** binary is a static ELF; placed in `~/.pi-freepi-bridge/bin/`, made executable, and added to PATH by the `install` command.
-- **Windows:** binary is a `.exe` inside a zip. The `install` command extracts it via PowerShell `Expand-Archive`. Place the directory in your system PATH if you want to run it outside pi.
-
-### 8. Multi-user / shared installs
-
-The daemon state lives in `~/.freepi-bridge/state.json` — shared across any manually started `freepi-bridge` and this extension. The extension auto-reuses a running daemon if already healthy.
-
-### 9. Troubleshooting
-
-**`401` / token not found** — set `FREEPI_TOKEN` env var or run `npx free-pi-cli@latest`.
-
-**`freepi-bridge binary not found`** — run `/freepi install` or ensure the binary is on PATH.
-
-**Daemon port conflict** — the extension auto-picks a free port; change with `FREEPI_BRIDGE_PORT` env var.
-
-**`403 ads_required`** — the bridge reports one ad every 10 minutes by default. Set `FREEPI_AUTO_AD=0` in `~/.freepi-bridge/config.env` to disable (open the printed `/ads` page in a browser instead).
-
-### 10. License
-
-MIT. See LICENSE.
+The extension spawns (or reuses) the [freepi-bridge](https://github.com/ihsan-ramadhan/freepi-bridge) local daemon and registers it as an OpenAI-compatible provider — no API key required.
 
 ---
 
-## Architecture
+## Install
 
-The extension:
+```bash
+git clone https://github.com/yayayapluto/pi-freepi-bridge.git
+omp plugin install ./pi-freepi-bridge
+```
 
-1. Finds or downloads `freepi-bridge` (cross-platform: Windows `.exe` via zip, Linux/macOS tar.gz).
-2. Spawns it as a background daemon (`freepi-bridge start --bg`).
-3. Probes `/health` and `/v1/models` to build the model list.
-4. Registers the provider `freepi` with `baseUrl: http://127.0.0.1:8787/v1` and the fetched models.
-5. Exposes `/freepi` commands for daemon control, token management, and model inspection.
-6. Keeps the daemon alive across pi/OMP sessions; reuses a running daemon if already healthy.
+Verify it loaded:
 
-Model data flows: `freepi-bridge /v1/models` → extension cache (`~/.freepi-bridge/pi-models.json`) → `pi.registerProvider("freepi", ...)` → any pi/OMP session can route requests to `freepi/<model_id>`.
+```bash
+omp plugin list | grep freepi
+```
 
-## Environment Variables
+> The plugin is registered as `pi-freepi-bridge` (from `package.json`), not the repo name.
+
+---
+
+## 1. Get a FreePi token (once per machine)
+
+```bash
+npx free-pi-cli@latest
+```
+
+Sign in with GitHub, then quit. The token is saved to `~/.free-pi/agent/credentials.json`.
+
+Alternatives, in priority order:
+
+| Source | How |
+|---|---|
+| `FREEPI_TOKEN` env var | `set FREEPI_TOKEN=eyJ...` (Windows) / `export FREEPI_TOKEN=eyJ...` |
+| Credentials file | `~/.free-pi/agent/credentials.json` (from the CLI above) |
+| Daemon config | `FREEPI_TOKEN=...` in `~/.freepi-bridge/config.env` |
+
+Check what was detected: `/freepi token`
+
+---
+
+## 2. Use a model
+
+```bash
+omp launch --model freepi/particle -p "hello"
+```
+
+On first use the extension will:
+
+1. find `freepi-bridge` on `PATH`, or download the matching release into `~/.pi-freepi-bridge/bin/`
+2. start the daemon on `127.0.0.1:8787`
+3. fetch `/v1/models` and register the `freepi` provider
+
+List what is available: `/freepi models`
+
+---
+
+## Commands
+
+| Command | Does |
+|---|---|
+| `/freepi status` | daemon + provider + token status |
+| `/freepi token` | show token source, or sign-in guide |
+| `/freepi doctor` | run `freepi-bridge doctor` |
+| `/freepi models` | list registered model ids |
+| `/freepi refresh-models` | re-fetch `/v1/models`, re-register provider |
+| `/freepi start` | start the daemon |
+| `/freepi stop` | stop the daemon |
+| `/freepi restart` | stop + start |
+| `/freepi ads` | print the FreePi ad page URL |
+| `/freepi logs` | tail `~/.freepi-bridge/bridge.log` |
+| `/freepi install` | install/verify the `freepi-bridge` binary |
+
+---
+
+## Environment variables
 
 | Variable | Default | Effect |
 |---|---|---|
-| `FREEPI_TOKEN` | unset | FreePi JWT; env wins over `config.env` |
-| `FREEPI_BRIDGE_BIN` | unset | Explicit path to `freepi-bridge` binary |
-| `FREEPI_BRIDGE_PORT` | `8787` | Override daemon listen port |
-| `FREEPI_AUTO_AD` | `1` | Auto-report ads (`0` = disable, open `/ads` in browser) |
-| `FREEPI_BRIDGE_DOWNLOAD_BASE` | `https://github.com/ihsan-ramadhan/freepi-bridge/releases` | Mirror for binary downloads |
+| `FREEPI_TOKEN` | unset | FreePi JWT; highest priority |
+| `FREEPI_BRIDGE_BIN` | unset | Explicit path to the `freepi-bridge` binary |
+| `FREEPI_BRIDGE_PORT` | `8787` | Daemon listen port |
+| `FREEPI_AUTO_AD` | `1` | Auto-report ads (`0` disables; open `/ads` manually) |
+
+---
+
+## Troubleshooting
+
+| Symptom | Fix |
+|---|---|
+| `freepi-bridge binary not found` | `/freepi install`, or put the binary on `PATH` |
+| `401` / login errors | run `npx free-pi-cli@latest`, or set `FREEPI_TOKEN` |
+| Port already in use | set `FREEPI_BRIDGE_PORT` |
+| `403 ads_required` | set `FREEPI_AUTO_AD=0` and open the `/ads` page the bridge prints |
+| Daemon stuck | `/freepi restart`, logs via `/freepi logs` |
+
+---
+
+## How it works
+
+```
+pi/OMP ──▶ provider "freepi" (http://127.0.0.1:8787/v1)
+                 │
+                 ▼
+          freepi-bridge daemon  ──▶  FreePi account
+                 │
+                 └─ state: ~/.freepi-bridge/state.json
+                    models cache: ~/.freepi-bridge/pi-models.json
+```
+
+The extension writes no credentials itself. It only reads the token locations listed above and hands control to the daemon.
+
+---
 
 ## Development
 
 ```bash
-# Build
-npm run build
-
-# Link for local development
-omp plugin install /path/to/pi-freepi-bridge
-
-# Run the pi/OMP session with this model:
-omp launch --model freepi/particle -p "hello"
+npm install
+npm run build          # esbuild → dist/index.js
+omp plugin install .   # link local build
 ```
 
-## Extending
+Source lives in `src/index.ts`; `dist/index.js` is the shipped bundle.
 
-To add more model features (e.g., `thinkingLevelMap`, `inputLimits`, `promptCache`), modify the `MODEL_BASE` object in `src/index.ts` and bump the version. The extension auto-propagates model metadata to pi/OMP.
+---
+
+## License and attribution
+
+**This extension:** MIT — see [LICENSE](LICENSE).
+
+**Upstream:** [freepi-bridge](https://github.com/ihsan-ramadhan/freepi-bridge) by [ihsan-ramadhan](https://github.com/ihsan-ramadhan), licensed **GPL-3.0-only**. The daemon itself is not modified or redistributed here.
+
+This extension does **not** bundle or link the GPL binary. At runtime it downloads the unmodified upstream release and executes it as a separate process, communicating only over HTTP. The binary remains governed by GPL-3.0-only. See [NOTICE](NOTICE).
