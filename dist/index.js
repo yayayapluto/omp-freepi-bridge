@@ -26,6 +26,31 @@ var FREE_IDS_CACHE_FILE = path.join(STATE_DIR, "free-models.json");
 var FREEPI_BASE_URL = (process.env.FREEPI_BASE_URL || "https://api.freepi.ai").replace(/\/+$/, "");
 var FREE_ONLY = process.env.FREEPI_FREE_ONLY !== "0";
 var BIN_DIR = path.join(os.homedir(), ".omp-freepi-bridge", "bin");
+var MODELS_YML = path.join(os.homedir(), ".omp", "agent", "models.yml");
+function syncModelsYml(baseUrl) {
+  if (!FREE_ONLY) return false;
+  let text;
+  try {
+    text = fs.readFileSync(MODELS_YML, "utf8");
+  } catch {
+    return false;
+  }
+  const lines = text.split(/\r?\n/);
+  const start = lines.findIndex((l) => /^\s{2}freepi:\s*$/.test(l));
+  if (start === -1) return false;
+  let end = start + 1;
+  while (end < lines.length && /^\s{4}\S/.test(lines[end])) end++;
+  const at = lines.findIndex((l, i) => i > start && i < end && /^\s+baseUrl:/.test(l));
+  if (at === -1) return false;
+  if (lines[at].trim() === `baseUrl: ${baseUrl}`) return false;
+  lines[at] = `    baseUrl: ${baseUrl}`;
+  try {
+    fs.writeFileSync(MODELS_YML, lines.join("\n"));
+    return true;
+  } catch {
+    return false;
+  }
+}
 var CREDENTIALS_FILE = path.join(os.homedir(), ".free-pi", "agent", "credentials.json");
 var MODEL_BASE = {
   api: "openai-completions",
@@ -474,7 +499,7 @@ function freeModelList() {
   const merged = [...primary, ...extra];
   return merged.length > 0 ? merged : [...DEFAULT_FREE_MODELS];
 }
-function startFilterProxy(bridge) {
+function startFilterProxy(bridge, preferredPort = 0) {
   const { promise, resolve, reject } = Promise.withResolvers();
   const freeSet = () => FREE_ONLY ? new Set(freeModelList()) : null;
   const server = http.createServer((req, res) => {
@@ -561,16 +586,24 @@ function startFilterProxy(bridge) {
       attempt(0, 0);
     });
   });
-  server.on("error", reject);
-  server.listen(0, HOST, () => {
+  const onListening = () => {
     const addr = server.address();
     const port = typeof addr === "object" && addr !== null ? addr.port : 0;
     resolve({ url: `http://${HOST}:${port}/v1`, close: () => server.close() });
+  };
+  server.once("error", (err) => {
+    if (err.code === "EADDRINUSE" && preferredPort !== 0) {
+      server.listen(0, HOST, onListening);
+      return;
+    }
+    reject(err);
   });
+  server.listen(preferredPort, HOST, onListening);
   return promise;
 }
 async function index_default(pi) {
-  let currentEndpoint = { host: HOST, port: DEFAULT_PORT };
+  const state = readState();
+  let currentEndpoint = { host: HOST, port: state?.port ?? DEFAULT_PORT };
   let currentModels = [];
   let proxy = null;
   const binary = resolveBinaryPath();
@@ -578,36 +611,47 @@ async function index_default(pi) {
   if (!token.has) {
     pi.ui.notify(`freepi: ${signInGuide().split("\n")[0]}`, "warning");
   }
-  const registerProvider = async () => {
-    const bin = binary || await ensureBinaryInstalled().catch(() => null);
-    if (!bin) throw new Error("freepi-bridge binary not available. Run `/freepi install` or install freepi-bridge manually.");
-    const info = await ensureDaemonRunning(bin);
-    const endpointChanged = proxy !== null && (proxy.endpoint.port !== info.port || proxy.endpoint.host !== info.host);
-    if (endpointChanged) {
-      proxy?.close();
-      proxy = null;
-    }
-    currentEndpoint = info;
-    if (!proxy) {
-      const started = await startFilterProxy(currentEndpoint);
-      proxy = { ...started, endpoint: currentEndpoint };
-    }
-    let models = await fetchModels(currentEndpoint);
-    if (models.length === 0) models = loadModelsCache();
-    currentModels = models;
+  const cached = loadModelsCache();
+  const initialModels = cached.length > 0 ? cached : freeModelList().map((id) => ({ ...MODEL_BASE, id, name: id }));
+  currentModels = initialModels;
+  const preferredProxyPort = (endpoint) => Number(process.env.FREEPI_PROXY_PORT) || endpoint.port + 1;
+  let proxyUrl = `http://${HOST}:${preferredProxyPort(currentEndpoint)}/v1`;
+  const register = (models, baseUrl) => {
     pi.registerProvider(EXTENSION_NAME, {
-      baseUrl: proxy.url,
+      baseUrl,
       apiKey: "freepi",
       api: "openai-completions",
       models,
       refreshModels: async () => fetchModels(currentEndpoint)
     });
-    pi.setStatus(EXTENSION_NAME, `${models.length} free models via ${proxy.url}`);
+    pi.setStatus?.(EXTENSION_NAME, `${models.length} free models via ${baseUrl}`);
   };
-  try {
-    await registerProvider();
-  } catch (err) {
-  }
+  register(initialModels, proxyUrl);
+  const startProxy = (endpoint) => {
+    startFilterProxy(endpoint, preferredProxyPort(endpoint)).then((started) => {
+      proxy?.close();
+      proxy = { ...started, endpoint };
+      proxyUrl = started.url;
+      register(currentModels, proxyUrl);
+      syncModelsYml(proxyUrl);
+    }).catch(() => {
+    });
+  };
+  startProxy(currentEndpoint);
+  const refresh = async () => {
+    const bin = binary || await ensureBinaryInstalled().catch(() => null);
+    if (!bin) throw new Error("freepi-bridge binary not available. Run `/freepi install` or install freepi-bridge manually.");
+    const info = await ensureDaemonRunning(bin);
+    const changed = info.port !== currentEndpoint.port || info.host !== currentEndpoint.host;
+    currentEndpoint = info;
+    if (changed) startProxy(info);
+    let models = await fetchModels(currentEndpoint);
+    if (models.length === 0) models = loadModelsCache();
+    currentModels = models;
+    register(models, proxyUrl);
+  };
+  void refresh().catch(() => {
+  });
   pi.registerCommand(EXTENSION_NAME, {
     description: "freepi-bridge daemon & provider: status | token | doctor | models | refresh-models | start | stop | restart | ads | logs | install | help",
     getArgumentCompletions: (prefix) => [
@@ -683,7 +727,7 @@ async function index_default(pi) {
             break;
           }
           try {
-            await registerProvider();
+            await refresh();
             ctx.ui.notify(`freepi: re-registered ${currentModels.length} models from ${currentEndpoint.host}:${currentEndpoint.port}`, "info");
           } catch (err) {
             ctx.ui.notify(`freepi: refresh-models failed \u2014 ${String(err)}`, "error");
@@ -699,7 +743,7 @@ async function index_default(pi) {
           try {
             const info = await ensureDaemonRunning(bin);
             currentEndpoint = info;
-            await registerProvider();
+            await refresh();
             ctx.ui.notify(`freepi daemon started on ${currentEndpoint.host}:${currentEndpoint.port} (pid ${info.pid})`, "info");
           } catch (err) {
             ctx.ui.notify(`freepi: start failed \u2014 ${String(err)}`, "error");
@@ -722,7 +766,7 @@ async function index_default(pi) {
           try {
             const info = await ensureDaemonRunning(bin);
             currentEndpoint = info;
-            await registerProvider();
+            await refresh();
             ctx.ui.notify(`freepi daemon restarted on ${currentEndpoint.host}:${currentEndpoint.port}`, "info");
           } catch (err) {
             ctx.ui.notify(`freepi: restart failed \u2014 ${String(err)}`, "error");

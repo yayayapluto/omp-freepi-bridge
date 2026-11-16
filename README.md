@@ -53,7 +53,7 @@ On first use the extension will:
 
 1. find `freepi-bridge` on `PATH`, or download the matching release into `~/.omp-freepi-bridge/bin/`
 2. start the daemon on `127.0.0.1:8787`
-3. fetch `/v1/models` and register the `freepi` provider
+3. start the free-model proxy on `127.0.0.1:8788` and point `freepi` at it
 
 List what is available: `/freepi models`
 
@@ -75,8 +75,16 @@ and the daemon:
 
 - `GET /v1/models` → only the free models, in priority order
 - `POST /v1/chat/completions` → a premium model id is rerouted to the best free model
-- upstream `403`/`429`/`5xx` → retried with the next free model
+- upstream `403`/`429`/`5xx` → `429 concurrent` retries the same model with backoff, everything else walks the chain
 - the model actually used is returned in the `x-freepi-model` response header
+
+OMP also keeps its own provider config in `~/.omp/agent/models.yml`, which overrides
+the runtime registration. The extension rewrites the `freepi.baseUrl` entry to the
+proxy URL on startup, so discovery (`omp models`) and chat both go through the filter.
+The proxy listens on `8788` (daemon port `+1`).
+
+Run `omp models refresh freepi` once after upgrading from a version that pointed at
+the daemon directly; OMP caches the discovered list.
 
 Fallback chain (best → least), also used when tier lookup is unavailable:
 
@@ -115,7 +123,8 @@ To expose everything anyway (e.g. you bought credits), set `FREEPI_FREE_ONLY=0`.
 | `FREEPI_BRIDGE_BIN` | unset | Explicit path to the `freepi-bridge` binary |
 | `FREEPI_BRIDGE_PORT` | `8787` | Daemon listen port |
 | `FREEPI_AUTO_AD` | `1` | Auto-report ads (`0` disables; open `/ads` manually) |
-| `FREEPI_FREE_ONLY` | `1` | Register only credit-free models (`0` shows all) |
+| `FREEPI_FREE_ONLY` | `1` | Register only credit-free models (`0` shows all, disables the proxy + `models.yml` rewrite) |
+| `FREEPI_PROXY_PORT` | daemon port `+1` | Port for the free-model filter proxy |
 | `FREEPI_BASE_URL` | `https://api.freepi.ai` | Upstream FreePi API used for tier lookup |
 
 ---
@@ -128,7 +137,8 @@ To expose everything anyway (e.g. you bought credits), set `FREEPI_FREE_ONLY=0`.
 | `401` / login errors | run `npx free-pi-cli@latest`, or set `FREEPI_TOKEN` |
 | Port already in use | set `FREEPI_BRIDGE_PORT` |
 | `403 ads_required` | set `FREEPI_AUTO_AD=0` and open the `/ads` page the bridge prints |
-| `403 At capacity for free users` | you picked a premium model; run `/freepi refresh-models` and use a free one |
+| `403 At capacity for free users` | premium model id; the proxy reroutes it, but `FREEPI_FREE_ONLY=0` bypasses that — use a free id |
+| Catalog still lists paid models | `omp models refresh freepi` (OMP caches the discovered list) |
 | Daemon stuck | `/freepi restart`, logs via `/freepi logs` |
 
 ---
@@ -136,14 +146,19 @@ To expose everything anyway (e.g. you bought credits), set `FREEPI_FREE_ONLY=0`.
 ## How it works
 
 ```
-pi/OMP ──▶ provider "freepi" (http://127.0.0.1:8787/v1)
+pi/OMP ──▶ provider "freepi" (http://127.0.0.1:8788/v1, filter proxy)
                  │
                  ▼
-          freepi-bridge daemon  ──▶  FreePi account
-                 │
-                 └─ state: ~/.freepi-bridge/state.json
+          free-model proxy  ──▶  freepi-bridge daemon (127.0.0.1:8787)
+                 │                        │
+                 │                        └─ state: ~/.freepi-bridge/state.json
+                 └─ free tier: ~/.freepi-bridge/free-models.json
                     models cache: ~/.freepi-bridge/pi-models.json
+                    OMP provider config: ~/.omp/agent/models.yml
 ```
+
+Extension load never touches the network: the provider is registered from the cached
+model list immediately and refreshed in the background, so `omp models` stays fast.
 
 The extension writes no credentials itself. It only reads the token locations listed above and hands control to the daemon.
 
