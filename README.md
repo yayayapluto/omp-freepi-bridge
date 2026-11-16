@@ -8,8 +8,24 @@ The extension spawns (or reuses) the [freepi-bridge](https://github.com/ihsan-ra
 
 ## Install
 
+From npm:
+
+```bash
+omp plugin install omp-freepi-bridge
+```
+
+From the OMP marketplace:
+
+```bash
+omp plugin marketplace add yayayapluto/omp-freepi-bridge
+omp plugin install omp-freepi-bridge@omp-freepi-bridge
+```
+
+From source:
+
 ```bash
 git clone https://github.com/yayayapluto/omp-freepi-bridge.git
+npm install && npm run build
 omp plugin install ./omp-freepi-bridge
 ```
 
@@ -19,7 +35,18 @@ Verify it loaded:
 omp plugin list | grep freepi
 ```
 
+`npm i -g omp-freepi-bridge` installs the package but does not register it with
+OMP; use `omp plugin install` so the runtime picks it up.
+
 > The plugin is registered as `omp-freepi-bridge` (from `package.json`), matching the repo name.
+
+### Update
+
+```bash
+npm view omp-freepi-bridge version          # latest published
+omp plugin marketplace update omp-freepi-bridge
+omp plugin upgrade omp-freepi-bridge@omp-freepi-bridge
+```
 
 ---
 
