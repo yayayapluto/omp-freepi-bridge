@@ -1,0 +1,16 @@
+freepi-bridge OMP extension
+Copyright (c) 2026 yayayapluto
+Licensed under the MIT License (see LICENSE).
+
+This package interoperates with freepi-bridge:
+
+  freepi-bridge
+  https://github.com/ihsan-ramadhan/freepi-bridge
+  Copyright (c) ihsan-ramadhan
+  Licensed under the GNU General Public License, version 3 only (GPL-3.0-only).
+
+freepi-bridge is NOT bundled with, linked against, or redistributed by this
+package. At runtime this extension downloads the unmodified upstream release
+binary from the upstream GitHub releases and launches it as a separate process,
+communicating over HTTP on 127.0.0.1. The downloaded binary remains subject to
+GPL-3.0-only; its source is available at the URL above.
