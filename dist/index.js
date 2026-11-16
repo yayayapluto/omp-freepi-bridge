@@ -22,6 +22,9 @@ var STATE_DIR = path.join(os.homedir(), ".freepi-bridge");
 var STATE_FILE = path.join(STATE_DIR, "state.json");
 var CONFIG_ENV = path.join(STATE_DIR, "config.env");
 var MODELS_CACHE_FILE = path.join(STATE_DIR, "pi-models.json");
+var FREE_IDS_CACHE_FILE = path.join(STATE_DIR, "free-models.json");
+var FREEPI_BASE_URL = (process.env.FREEPI_BASE_URL || "https://api.freepi.ai").replace(/\/+$/, "");
+var FREE_ONLY = process.env.FREEPI_FREE_ONLY !== "0";
 var BIN_DIR = path.join(os.homedir(), ".omp-freepi-bridge", "bin");
 var CREDENTIALS_FILE = path.join(os.homedir(), ".free-pi", "agent", "credentials.json");
 var MODEL_BASE = {
@@ -50,16 +53,16 @@ function signInGuide() {
 or set:  FREEPI_TOKEN=eyJ...  freepi-bridge start --bg
 On headless hosts, copy ~/.free-pi/agent/credentials.json from a machine where you signed in.`;
 }
-function tokenSource() {
+function readToken() {
   const env = process.env.FREEPI_TOKEN;
   if (env && env.trim()) {
-    return { has: true, source: "env FREEPI_TOKEN", masked: maskToken(env.trim()) };
+    return { token: env.trim(), source: "env FREEPI_TOKEN", masked: maskToken(env.trim()) };
   }
   try {
     if (fs.existsSync(CREDENTIALS_FILE)) {
       const data = JSON.parse(fs.readFileSync(CREDENTIALS_FILE, "utf8"));
       const tok = data?.token || data?.access_token || null;
-      if (tok) return { has: true, source: "~/.free-pi/agent/credentials.json", masked: maskToken(tok) };
+      if (tok) return { token: tok, source: "~/.free-pi/agent/credentials.json", masked: maskToken(tok) };
     }
   } catch {
   }
@@ -67,11 +70,15 @@ function tokenSource() {
     if (fs.existsSync(CONFIG_ENV)) {
       const text = fs.readFileSync(CONFIG_ENV, "utf8");
       const m = text.match(/^\s*FREEPI_TOKEN\s*=\s*(.+?)\s*$/m);
-      if (m?.[1]) return { has: true, source: "~/.freepi-bridge/config.env", masked: maskToken(m[1]) };
+      if (m?.[1]) return { token: m[1], source: "~/.freepi-bridge/config.env", masked: maskToken(m[1]) };
     }
   } catch {
   }
-  return { has: false, source: "none", masked: null };
+  return { token: null, source: "none", masked: null };
+}
+function tokenSource() {
+  const { token, source, masked } = readToken();
+  return { has: Boolean(token), source, masked };
 }
 function which(name) {
   const pathEnv = process.env.PATH || "";
@@ -342,7 +349,76 @@ function toProviderModel(m) {
   const id = String(m.id || "unknown");
   return { ...MODEL_BASE, id, name: id };
 }
-async function fetchModels(endpoint) {
+function saveFreeIds(ids) {
+  try {
+    fs.mkdirSync(path.dirname(FREE_IDS_CACHE_FILE), { recursive: true });
+    fs.writeFileSync(FREE_IDS_CACHE_FILE, JSON.stringify({ savedAt: Date.now(), ids }));
+  } catch {
+  }
+}
+function loadFreeIds() {
+  try {
+    const d = JSON.parse(fs.readFileSync(FREE_IDS_CACHE_FILE, "utf8"));
+    if (Array.isArray(d?.ids)) return d.ids.filter((id) => typeof id === "string");
+  } catch {
+  }
+  return [];
+}
+function fetchFreeModelIds(token) {
+  if (!token) return Promise.resolve(null);
+  const { promise, resolve } = Promise.withResolvers();
+  const u = new URL(`${FREEPI_BASE_URL}/client-version`);
+  const mod = u.protocol === "https:" ? __require("node:https") : __require("node:http");
+  const req = mod.get(
+    u,
+    {
+      headers: {
+        Authorization: `Bearer ${token}`,
+        Accept: "application/json",
+        "User-Agent": `omp-freepi-bridge/${EXTENSION_VERSION}`
+      },
+      timeout: 5e3
+    },
+    (res) => {
+      if (res.statusCode !== 200) {
+        res.resume();
+        resolve(null);
+        return;
+      }
+      const chunks = [];
+      res.on("data", (c) => chunks.push(c));
+      res.on("end", () => {
+        try {
+          const payload = JSON.parse(Buffer.concat(chunks).toString());
+          const entries = Array.isArray(payload?.models) ? payload.models : [];
+          const ids = [];
+          for (const entry of entries) {
+            if (entry && entry.free === true && typeof entry.id === "string" && entry.id) ids.push(entry.id);
+          }
+          if (ids.length > 0) {
+            saveFreeIds(ids);
+            resolve(ids);
+          } else {
+            resolve(null);
+          }
+        } catch {
+          resolve(null);
+        }
+      });
+      res.on("error", () => resolve(null));
+    }
+  );
+  req.on("error", () => resolve(null));
+  req.on("timeout", () => {
+    req.destroy();
+    resolve(null);
+  });
+  return promise;
+}
+function freeModelIds() {
+  return freeModelList();
+}
+async function fetchBridgeModels(endpoint) {
   const first = await fetchModelsJson(endpoint);
   if (first && typeof first === "object" && "data" in first && Array.isArray(first.data)) {
     const items = first.data;
@@ -354,7 +430,6 @@ async function fetchModels(endpoint) {
         }
       }
       if (models.length > 0) {
-        saveModelsCache(models);
         return models;
       }
     }
@@ -362,6 +437,18 @@ async function fetchModels(endpoint) {
   const cached = loadModelsCache();
   if (cached.length > 0) return cached;
   return [];
+}
+async function fetchModels(endpoint) {
+  const all = await fetchBridgeModels(endpoint);
+  if (!FREE_ONLY) {
+    saveModelsCache(all);
+    return all;
+  }
+  await fetchFreeModelIds(readToken().token);
+  const byId = new Map(all.map((m) => [m.id, m]));
+  const result = freeModelList().map((id) => byId.get(id) ?? { ...MODEL_BASE, id, name: id });
+  saveModelsCache(result);
+  return result;
 }
 function saveModelsCache(models) {
   try {
@@ -378,9 +465,114 @@ function loadModelsCache() {
   }
   return [];
 }
+var DEFAULT_FREE_MODELS = ["particle", "deepseek-v4.1-flash", "glm-5.3-flash", "deepseek-v4-flash"];
+var RETRY_STATUS = /* @__PURE__ */ new Set([403, 408, 409, 425, 429, 500, 502, 503, 504]);
+function freeModelList() {
+  const detected = loadFreeIds();
+  const primary = DEFAULT_FREE_MODELS.filter((id) => detected.length === 0 || detected.includes(id));
+  const extra = detected.filter((id) => !DEFAULT_FREE_MODELS.includes(id));
+  const merged = [...primary, ...extra];
+  return merged.length > 0 ? merged : [...DEFAULT_FREE_MODELS];
+}
+function startFilterProxy(bridge) {
+  const { promise, resolve, reject } = Promise.withResolvers();
+  const freeSet = () => FREE_ONLY ? new Set(freeModelList()) : null;
+  const server = http.createServer((req, res) => {
+    const allowed = freeSet();
+    const pathname = (req.url || "/").split("?")[0];
+    if (req.method === "GET" && (pathname === "/v1/models" || pathname === "/models")) {
+      const byId = new Map(loadModelsCache().map((m) => [m.id, m]));
+      const ids = allowed ? [...allowed] : loadModelsCache().map((m) => m.id);
+      const data = ids.map((id) => byId.get(id) ?? { ...MODEL_BASE, id, name: id });
+      res.writeHead(200, { "content-type": "application/json" });
+      res.end(JSON.stringify({ object: "list", data, fetchedAt: Date.now() }));
+      return;
+    }
+    const chunks = [];
+    req.on("data", (c) => chunks.push(c));
+    req.on("end", () => {
+      const raw = Buffer.concat(chunks);
+      let requested = null;
+      let parsedBody = null;
+      if (raw.length > 0) {
+        try {
+          const parsed = JSON.parse(raw.toString());
+          parsedBody = parsed && typeof parsed === "object" ? parsed : null;
+          requested = typeof parsed?.model === "string" ? parsed.model : null;
+        } catch {
+        }
+      }
+      const order = freeModelList();
+      const chain = requested && order.includes(requested) ? [requested, ...order.filter((id) => id !== requested)] : order;
+      const bodyFor = (model) => {
+        if (!requested || model === requested || !parsedBody) return raw;
+        return Buffer.from(JSON.stringify({ ...parsedBody, model }));
+      };
+      const attempt = (index, sameTries) => {
+        if (index >= chain.length) {
+          res.writeHead(503, { "content-type": "application/json" });
+          res.end(JSON.stringify({ error: { message: "all free freepi models failed", type: "api_error" } }));
+          return;
+        }
+        const model = chain[index];
+        const payload = bodyFor(model);
+        const headers = { ...req.headers, host: `${bridge.host}:${bridge.port}` };
+        if (payload.length > 0) headers["content-length"] = String(payload.length);
+        else delete headers["content-length"];
+        const upstream = http.request(
+          {
+            host: bridge.host,
+            port: bridge.port,
+            method: req.method,
+            path: req.url,
+            headers,
+            timeout: 18e4
+          },
+          (up) => {
+            const status = up.statusCode || 502;
+            if (status >= 200 && status < 300) {
+              res.writeHead(status, { ...up.headers, "x-freepi-model": model });
+              up.pipe(res);
+              return;
+            }
+            const parts = [];
+            up.on("data", (c) => parts.push(c));
+            up.on("end", () => {
+              const text = Buffer.concat(parts).toString();
+              const accountBusy = status === 429 || /concurrent|one request at a time/i.test(text);
+              if (accountBusy && sameTries < 3) {
+                setTimeout(() => attempt(index, sameTries + 1), 1200 * (sameTries + 1));
+                return;
+              }
+              if (RETRY_STATUS.has(status) && index + 1 < chain.length) {
+                attempt(index + 1, 0);
+                return;
+              }
+              res.writeHead(status, { "content-type": "application/json", "x-freepi-model": model });
+              res.end(text);
+            });
+            up.on("error", () => attempt(index + 1, 0));
+          }
+        );
+        upstream.on("timeout", () => upstream.destroy());
+        upstream.on("error", () => attempt(index + 1, 0));
+        upstream.end(payload);
+      };
+      attempt(0, 0);
+    });
+  });
+  server.on("error", reject);
+  server.listen(0, HOST, () => {
+    const addr = server.address();
+    const port = typeof addr === "object" && addr !== null ? addr.port : 0;
+    resolve({ url: `http://${HOST}:${port}/v1`, close: () => server.close() });
+  });
+  return promise;
+}
 async function index_default(pi) {
   let currentEndpoint = { host: HOST, port: DEFAULT_PORT };
   let currentModels = [];
+  let proxy = null;
   const binary = resolveBinaryPath();
   const token = tokenSource();
   if (!token.has) {
@@ -390,17 +582,27 @@ async function index_default(pi) {
     const bin = binary || await ensureBinaryInstalled().catch(() => null);
     if (!bin) throw new Error("freepi-bridge binary not available. Run `/freepi install` or install freepi-bridge manually.");
     const info = await ensureDaemonRunning(bin);
+    const endpointChanged = proxy !== null && (proxy.endpoint.port !== info.port || proxy.endpoint.host !== info.host);
+    if (endpointChanged) {
+      proxy?.close();
+      proxy = null;
+    }
     currentEndpoint = info;
+    if (!proxy) {
+      const started = await startFilterProxy(currentEndpoint);
+      proxy = { ...started, endpoint: currentEndpoint };
+    }
     let models = await fetchModels(currentEndpoint);
     if (models.length === 0) models = loadModelsCache();
     currentModels = models;
     pi.registerProvider(EXTENSION_NAME, {
-      baseUrl: `http://${currentEndpoint.host}:${currentEndpoint.port}/v1`,
+      baseUrl: proxy.url,
       apiKey: "freepi",
       api: "openai-completions",
-      models
+      models,
+      refreshModels: async () => fetchModels(currentEndpoint)
     });
-    pi.setStatus(EXTENSION_NAME, `${models.length} models on ${currentEndpoint.host}:${currentEndpoint.port}`);
+    pi.setStatus(EXTENSION_NAME, `${models.length} free models via ${proxy.url}`);
   };
   try {
     await registerProvider();
@@ -593,8 +795,12 @@ export {
   ensureBinaryInstalled,
   ensureDaemonRunning,
   fetchModels,
+  freeModelIds,
+  freeModelList,
   loadModelsCache,
+  readToken,
   resolveBinaryPath,
+  startFilterProxy,
   stopDaemon,
   tokenSource
 };
