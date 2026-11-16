@@ -19,7 +19,7 @@ Verify it loaded:
 omp plugin list | grep freepi
 ```
 
-> The plugin is registered as `pi-freepi-bridge` (from `package.json`), not the repo name.
+> The plugin is registered as `omp-freepi-bridge` (from `package.json`), matching the repo name.
 
 ---
 
@@ -51,7 +51,7 @@ omp launch --model freepi/particle -p "hello"
 
 On first use the extension will:
 
-1. find `freepi-bridge` on `PATH`, or download the matching release into `~/.pi-freepi-bridge/bin/`
+1. find `freepi-bridge` on `PATH`, or download the matching release into `~/.omp-freepi-bridge/bin/`
 2. start the daemon on `127.0.0.1:8787`
 3. fetch `/v1/models` and register the `freepi` provider
 
