@@ -13,11 +13,11 @@
 	"license": "MIT",
 	"repository": {
 		"type": "git",
-		"url": "git+https://github.com/yayayapluto/pi-freepi-bridge.git"
+		"url": "git+https://github.com/yayayapluto/omp-freepi-bridge.git"
 	},
-	"homepage": "https://github.com/yayayapluto/pi-freepi-bridge#readme",
+	"homepage": "https://github.com/yayayapluto/omp-freepi-bridge#readme",
 	"bugs": {
-		"url": "https://github.com/yayayapluto/pi-freepi-bridge/issues"
+		"url": "https://github.com/yayayapluto/omp-freepi-bridge/issues"
 	},
 	"type": "module",
 	"main": "dist/index.js",

@@ -9,8 +9,8 @@ The extension spawns (or reuses) the [freepi-bridge](https://github.com/ihsan-ra
 ## Install
 
 ```bash
-git clone https://github.com/yayayapluto/pi-freepi-bridge.git
-omp plugin install ./pi-freepi-bridge
+git clone https://github.com/yayayapluto/omp-freepi-bridge.git
+omp plugin install ./omp-freepi-bridge
 ```
 
 Verify it loaded:
