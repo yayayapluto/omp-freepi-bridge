@@ -9,7 +9,7 @@
       "name": "omp-freepi-bridge",
       "source": "./",
       "version": "0.1.1",
-      "description": "Plug a FreePi account into OMP as the `freepi` provider. Spawns the freepi-bridge daemon, exposes only credit-free models, and reroutes premium ids."
+      "description": "Uses a healthy freepi-bridge daemon or starts one when needed, exposes only credit-free models, reroutes premium ids, and heals the bridge automatically."
     }
   ]
 }

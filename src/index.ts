@@ -84,6 +84,7 @@ const CREDENTIALS_FILE = path.join(os.homedir(), ".free-pi", "agent", "credentia
 
 type Endpoint = { host: string; port: number };
 type DaemonInfo = Endpoint & { pid?: number; startedByUs: boolean };
+type ProxyHandle = { url: string; close: () => void; setEndpoint: (next: Endpoint) => void };
 
 const MODEL_BASE: Omit<ProviderModelConfig, "id" | "name"> = {
 	api: "openai-completions",
@@ -295,7 +296,26 @@ function readState(): { host?: string; port?: number; pid?: number } | null {
 }
 
 
-function pidAlive(pid: number): boolean {
+async function discoverHealthyBridge(): Promise<Endpoint | null> {
+	const state = readState();
+	const envPort = Number(process.env.FREEPI_BRIDGE_PORT);
+	const ports: number[] = [];
+	const add = (p: number | undefined): void => {
+		if (p && Number.isInteger(p) && p > 0 && !ports.includes(p)) ports.push(p);
+	};
+	add(Number.isInteger(envPort) && envPort > 0 ? envPort : undefined);
+	add(state?.port);
+	add(DEFAULT_PORT);
+	for (let i = 1; i <= 6; i++) add(DEFAULT_PORT + i);
+	const checks = await Promise.all(
+		ports.map(async (port) => ({ port, ok: await healthz({ host: HOST, port }) })),
+	);
+	const hit = checks.find((c) => c.ok);
+	return hit ? { host: HOST, port: hit.port } : null;
+}
+
+function pidAlive(pid: number | undefined): boolean {
+	if (!pid) return false;
 	try {
 		process.kill(pid, 0);
 		return true;
@@ -303,7 +323,6 @@ function pidAlive(pid: number): boolean {
 		return false;
 	}
 }
-
 function healthz(endpoint: Endpoint): Promise<boolean> {
 	const { promise, resolve } = Promise.withResolvers<boolean>();
 	const req = http.get(
@@ -332,71 +351,84 @@ function findFreePort(start: number): Promise<number> {
 	return promise;
 }
 
+async function freeSpawnPort(): Promise<number> {
+	const state = readState();
+	const envPort = Number(process.env.FREEPI_BRIDGE_PORT);
+	const ports: number[] = [];
+	const add = (p: number | undefined): void => {
+		if (p && Number.isInteger(p) && p > 0 && !ports.includes(p)) ports.push(p);
+	};
+	add(Number.isInteger(envPort) && envPort > 0 ? envPort : undefined);
+	add(state?.port);
+	add(DEFAULT_PORT);
+	for (let i = 1; i <= 6; i++) add(DEFAULT_PORT + i);
+	for (const port of ports) {
+		try {
+			return await findFreePort(port);
+		} catch {
+			// kandidat berikutnya
+		}
+	}
+	throw new Error("freepi-bridge: tidak ada port bebas untuk daemon");
+}
+
 function spawnDaemon(binary: string, port: number): Promise<{ port: number; pid?: number }> {
 	const { promise, resolve, reject } = Promise.withResolvers<{ port: number; pid?: number }>();
 	const child = spawn(binary, ["start", "--bg", "--port", String(port), "--bind", HOST], {
 		detached: true,
-		stdio: "ignore",
+		stdio: ["ignore", "ignore", "pipe"],
 	});
 	child.unref();
+	let stderr = "";
+	child.stderr?.on("data", (chunk: Buffer) => {
+		stderr = (stderr + chunk.toString()).slice(-4096);
+	});
 	let done = false;
+	const finish = (fn: () => void): void => {
+		if (done) return;
+		done = true;
+		clearTimeout(timer);
+		fn();
+	};
 	const timer = setTimeout(() => {
-		if (!done) {
-			done = true;
-			reject(new Error(`freepi-bridge did not answer /health on port ${port}`));
-		}
+		finish(() => reject(new Error(`freepi-bridge tidak menjawab /health di port ${port}${stderr ? `: ${stderr.trim()}` : ""}`)));
 	}, 15_000);
-	const check = async () => {
+	const check = async (): Promise<void> => {
 		if (done) return;
 		try {
 			await new Promise((r) => setTimeout(r, 300));
-			const st = readState();
-			if (st && st.port) {
-				if (await healthz({ host: HOST, port: st.port })) {
-					done = true;
-					clearTimeout(timer);
-					resolve({ port: st.port, pid: st.pid });
-				} else {
-					check();
-				}
-			} else {
-				check();
+			if (await healthz({ host: HOST, port })) {
+				const st = readState();
+				const pid = st?.port === port && pidAlive(st.pid) ? st.pid : undefined;
+				finish(() => resolve({ port, pid }));
+				return;
 			}
 		} catch {
-			check();
+			// ulangi sampai timeout
 		}
+		check();
 	};
 	check();
-	child.on("error", (err) => {
-		if (!done) {
-			done = true;
-			clearTimeout(timer);
-			reject(err);
-		}
-	});
+	child.once("error", (err) => finish(() => reject(err)));
+	child.once("exit", (code) =>
+		finish(() =>
+			reject(new Error(`freepi-bridge keluar dengan kode ${code ?? "unknown"}${stderr ? `: ${stderr.trim()}` : ""}`)),
+		),
+	);
 	return promise;
 }
 
 export async function ensureDaemonRunning(binary: string): Promise<DaemonInfo> {
-	const state = readState();
-	if (state && state.port && pidAlive(state.pid || -1)) {
-		if (await healthz({ host: HOST, port: state.port })) {
-			return { host: HOST, port: state.port, pid: state.pid, startedByUs: false };
-		}
-	}
-	let port = DEFAULT_PORT;
-	try {
-		port = await findFreePort(DEFAULT_PORT).catch(() => DEFAULT_PORT);
-	} catch {
-		port = DEFAULT_PORT;
-	}
+	const healthy = await discoverHealthyBridge();
+	if (healthy) return { ...healthy, startedByUs: false };
+	const port = await freeSpawnPort();
 	const { port: boundPort, pid } = await spawnDaemon(binary, port);
 	return { host: HOST, port: boundPort, pid, startedByUs: true };
 }
 
 export async function stopDaemon(): Promise<void> {
 	const state = readState();
-	if (!state?.pid) return;
+	if (!state?.pid || !pidAlive(state.pid)) return;
 	try {
 		process.kill(state.pid);
 	} catch {
@@ -595,9 +627,13 @@ export function freeModelList(): string[] {
 // extension-provided list, and the bridge advertises premium-credit models.
 // This proxy is the only place we can enforce "free models only" and apply the
 // fallback chain.
-export function startFilterProxy(bridge: Endpoint, preferredPort = 0): Promise<{ url: string; close: () => void }> {
-	const { promise, resolve, reject } = Promise.withResolvers<{ url: string; close: () => void }>();
-
+export function startFilterProxy(
+	bridge: Endpoint,
+	onBridgeFailure: () => Promise<Endpoint | null>,
+	preferredPort = 0,
+): Promise<ProxyHandle> {
+	const { promise, resolve, reject } = Promise.withResolvers<ProxyHandle>();
+	let target = bridge;
 	const freeSet = (): Set<string> | null => (FREE_ONLY ? new Set(freeModelList()) : null);
 
 	const server = http.createServer((req, res) => {
@@ -641,8 +677,7 @@ export function startFilterProxy(bridge: Endpoint, preferredPort = 0): Promise<{
 			};
 
 			// `sameTries` counts retries of the *same* model for account-wide limits
-			// (FreePi allows one concurrent request per account), which switching
-			// models cannot fix.
+			let healed = false;
 			const attempt = (index: number, sameTries: number): void => {
 				if (index >= chain.length) {
 					res.writeHead(503, { "content-type": "application/json" });
@@ -652,15 +687,33 @@ export function startFilterProxy(bridge: Endpoint, preferredPort = 0): Promise<{
 				const model = chain[index];
 				const payload = bodyFor(model);
 
-				const headers = { ...req.headers, host: `${bridge.host}:${bridge.port}` };
+				const headers = { ...req.headers, host: `${target.host}:${target.port}` };
 				// The model id may have been rewritten, so the original length is stale.
 				if (payload.length > 0) headers["content-length"] = String(payload.length);
 				else delete headers["content-length"];
 
+				let reacted = false;
+				const failed = (): void => {
+					if (reacted) return;
+					reacted = true;
+					if (healed) {
+						attempt(index + 1, 0);
+						return;
+					}
+					healed = true;
+					onBridgeFailure().then(
+						(next) => {
+							if (next) target = next;
+							attempt(index, sameTries);
+						},
+						() => attempt(index + 1, 0),
+					);
+				};
+
 				const upstream = http.request(
 					{
-						host: bridge.host,
-						port: bridge.port,
+						host: target.host,
+						port: target.port,
 						method: req.method,
 						path: req.url,
 						headers,
@@ -671,6 +724,7 @@ export function startFilterProxy(bridge: Endpoint, preferredPort = 0): Promise<{
 						if (status >= 200 && status < 300) {
 							res.writeHead(status, { ...up.headers, "x-freepi-model": model });
 							up.pipe(res);
+							up.on("error", () => res.destroy());
 							return;
 						}
 						// Errors are small; buffer them to tell "account busy" from "this model".
@@ -690,11 +744,11 @@ export function startFilterProxy(bridge: Endpoint, preferredPort = 0): Promise<{
 							res.writeHead(status, { "content-type": "application/json", "x-freepi-model": model });
 							res.end(text);
 						});
-						up.on("error", () => attempt(index + 1, 0));
+						up.on("error", failed);
 					},
 				);
 				upstream.on("timeout", () => upstream.destroy());
-				upstream.on("error", () => attempt(index + 1, 0));
+				upstream.on("error", failed);
 				upstream.end(payload);
 			};
 
@@ -705,7 +759,7 @@ export function startFilterProxy(bridge: Endpoint, preferredPort = 0): Promise<{
 	const onListening = (): void => {
 		const addr = server.address();
 		const port = typeof addr === "object" && addr !== null ? addr.port : 0;
-		resolve({ url: `http://${HOST}:${port}/v1`, close: () => server.close() });
+		resolve({ url: `http://${HOST}:${port}/v1`, close: () => server.close(), setEndpoint: (next) => { target = next; } });
 	};
 
 	server.once("error", (err: NodeJS.ErrnoException) => {
@@ -724,7 +778,7 @@ export default async function (pi: ExtensionAPI): Promise<void> {
 	const state = readState();
 	let currentEndpoint: Endpoint = { host: HOST, port: state?.port ?? DEFAULT_PORT };
 	let currentModels: ProviderModelConfig[] = [];
-	let proxy: { url: string; close: () => void; endpoint: Endpoint } | null = null;
+	let proxy: ProxyHandle | null = null;
 
 	const binary = resolveBinaryPath();
 	const token = tokenSource();
@@ -754,21 +808,53 @@ export default async function (pi: ExtensionAPI): Promise<void> {
 		pi.setStatus?.(EXTENSION_NAME, `${models.length} free models via ${baseUrl}`);
 	};
 
+	let bringUpPromise: Promise<DaemonInfo> | null = null;
+	const bringUp = (bin: string): Promise<DaemonInfo> => {
+		if (bringUpPromise) return bringUpPromise;
+		bringUpPromise = ensureDaemonRunning(bin).finally(() => {
+			bringUpPromise = null;
+		});
+		return bringUpPromise;
+	};
+
+	let healPromise: Promise<Endpoint | null> | null = null;
+	let healBlockedUntil = 0;
+	const healBridge = (): Promise<Endpoint | null> => {
+		if (healPromise) return healPromise;
+		if (Date.now() < healBlockedUntil || !binary) return Promise.resolve(null);
+		healPromise = bringUp(binary)
+			.then((info) => {
+				currentEndpoint = info;
+				proxy?.setEndpoint(info);
+				pi.setStatus?.(EXTENSION_NAME, `${currentModels.length} free models via ${proxyUrl}`);
+				return { host: info.host, port: info.port };
+			})
+			.catch((err) => {
+				healBlockedUntil = Date.now() + 5_000;
+				pi.setStatus?.(EXTENSION_NAME, `freepi: bridge offline — ${String(err)}`);
+				return null;
+			})
+			.finally(() => {
+				healPromise = null;
+			});
+		return healPromise;
+	};
+
 	// Register synchronously: extension load must never wait on the network,
 	// otherwise commands like `omp models` stall.
 	register(initialModels, proxyUrl);
 
 	const startProxy = (endpoint: Endpoint): void => {
-		startFilterProxy(endpoint, preferredProxyPort(endpoint))
+		startFilterProxy(endpoint, healBridge, preferredProxyPort(endpoint))
 			.then((started) => {
 				proxy?.close();
-				proxy = { ...started, endpoint };
+				proxy = started;
 				proxyUrl = started.url;
 				register(currentModels, proxyUrl);
 				syncModelsYml(proxyUrl);
 			})
-			.catch(() => {
-				// keep the optimistic URL; failures surface on request
+			.catch((err) => {
+				pi.setStatus?.(EXTENSION_NAME, `freepi: filter proxy gagal - ${String(err)}`);
 			});
 	};
 
@@ -777,20 +863,24 @@ export default async function (pi: ExtensionAPI): Promise<void> {
 	const refresh = async (): Promise<void> => {
 		const bin = binary || (await ensureBinaryInstalled().catch(() => null));
 		if (!bin) throw new Error("freepi-bridge binary not available. Run `/freepi install` or install freepi-bridge manually.");
-		const info = await ensureDaemonRunning(bin);
-		const changed = info.port !== currentEndpoint.port || info.host !== currentEndpoint.host;
+		const info = await bringUp(bin);
 		currentEndpoint = info;
-		if (changed) startProxy(info);
+		proxy?.setEndpoint(info);
 
-		let models = await fetchModels(currentEndpoint);
+		let models: ProviderModelConfig[] = [];
+		try {
+			models = await fetchModels(currentEndpoint);
+		} catch {
+			models = [];
+		}
 		if (models.length === 0) models = loadModelsCache();
 		currentModels = models;
 		register(models, proxyUrl);
 	};
 
 	// Background bring-up; never blocks extension load.
-	void refresh().catch(() => {
-		// reported by /freepi status
+	void refresh().catch((err) => {
+		pi.setStatus?.(EXTENSION_NAME, `freepi: bridge offline — ${String(err)}`);
 	});
 
 	pi.registerCommand(EXTENSION_NAME, {
@@ -887,7 +977,7 @@ export default async function (pi: ExtensionAPI): Promise<void> {
 						break;
 					}
 					try {
-						const info = await ensureDaemonRunning(bin);
+						const info = await bringUp(bin);
 						currentEndpoint = info;
 						await refresh();
 						ctx.ui.notify(`freepi daemon started on ${currentEndpoint.host}:${currentEndpoint.port} (pid ${info.pid})`, "info");
@@ -910,7 +1000,7 @@ export default async function (pi: ExtensionAPI): Promise<void> {
 						break;
 					}
 					try {
-						const info = await ensureDaemonRunning(bin);
+						const info = await bringUp(bin);
 						currentEndpoint = info;
 						await refresh();
 						ctx.ui.notify(`freepi daemon restarted on ${currentEndpoint.host}:${currentEndpoint.port}`, "info");
