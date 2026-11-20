@@ -236,7 +236,25 @@ function readState() {
     return null;
   }
 }
+async function discoverHealthyBridge() {
+  const state = readState();
+  const envPort = Number(process.env.FREEPI_BRIDGE_PORT);
+  const ports = [];
+  const add = (p) => {
+    if (p && Number.isInteger(p) && p > 0 && !ports.includes(p)) ports.push(p);
+  };
+  add(Number.isInteger(envPort) && envPort > 0 ? envPort : void 0);
+  add(state?.port);
+  add(DEFAULT_PORT);
+  for (let i = 1; i <= 6; i++) add(DEFAULT_PORT + i);
+  const checks = await Promise.all(
+    ports.map(async (port) => ({ port, ok: await healthz({ host: HOST, port }) }))
+  );
+  const hit = checks.find((c) => c.ok);
+  return hit ? { host: HOST, port: hit.port } : null;
+}
 function pidAlive(pid) {
+  if (!pid) return false;
   try {
     process.kill(pid, 0);
     return true;
@@ -270,69 +288,80 @@ function findFreePort(start) {
   });
   return promise;
 }
+async function freeSpawnPort() {
+  const state = readState();
+  const envPort = Number(process.env.FREEPI_BRIDGE_PORT);
+  const ports = [];
+  const add = (p) => {
+    if (p && Number.isInteger(p) && p > 0 && !ports.includes(p)) ports.push(p);
+  };
+  add(Number.isInteger(envPort) && envPort > 0 ? envPort : void 0);
+  add(state?.port);
+  add(DEFAULT_PORT);
+  for (let i = 1; i <= 6; i++) add(DEFAULT_PORT + i);
+  for (const port of ports) {
+    try {
+      return await findFreePort(port);
+    } catch {
+    }
+  }
+  throw new Error("freepi-bridge: tidak ada port bebas untuk daemon");
+}
 function spawnDaemon(binary, port) {
   const { promise, resolve, reject } = Promise.withResolvers();
   const child = spawn(binary, ["start", "--bg", "--port", String(port), "--bind", HOST], {
     detached: true,
-    stdio: "ignore"
+    stdio: ["ignore", "ignore", "pipe"]
   });
   child.unref();
+  let stderr = "";
+  child.stderr?.on("data", (chunk) => {
+    stderr = (stderr + chunk.toString()).slice(-4096);
+  });
   let done = false;
+  const finish = (fn) => {
+    if (done) return;
+    done = true;
+    clearTimeout(timer);
+    fn();
+  };
   const timer = setTimeout(() => {
-    if (!done) {
-      done = true;
-      reject(new Error(`freepi-bridge did not answer /health on port ${port}`));
-    }
+    finish(() => reject(new Error(`freepi-bridge tidak menjawab /health di port ${port}${stderr ? `: ${stderr.trim()}` : ""}`)));
   }, 15e3);
   const check = async () => {
     if (done) return;
     try {
       await new Promise((r) => setTimeout(r, 300));
-      const st = readState();
-      if (st && st.port) {
-        if (await healthz({ host: HOST, port: st.port })) {
-          done = true;
-          clearTimeout(timer);
-          resolve({ port: st.port, pid: st.pid });
-        } else {
-          check();
-        }
-      } else {
-        check();
+      if (await healthz({ host: HOST, port })) {
+        const st = readState();
+        const pid = st?.port === port && pidAlive(st.pid) ? st.pid : void 0;
+        finish(() => resolve({ port, pid }));
+        return;
       }
     } catch {
-      check();
     }
+    check();
   };
   check();
-  child.on("error", (err) => {
-    if (!done) {
-      done = true;
-      clearTimeout(timer);
-      reject(err);
-    }
-  });
+  child.once("error", (err) => finish(() => reject(err)));
+  child.once(
+    "exit",
+    (code) => finish(
+      () => reject(new Error(`freepi-bridge keluar dengan kode ${code ?? "unknown"}${stderr ? `: ${stderr.trim()}` : ""}`))
+    )
+  );
   return promise;
 }
 async function ensureDaemonRunning(binary) {
-  const state = readState();
-  if (state && state.port && pidAlive(state.pid || -1)) {
-    if (await healthz({ host: HOST, port: state.port })) {
-      return { host: HOST, port: state.port, pid: state.pid, startedByUs: false };
-    }
-  }
-  let port = DEFAULT_PORT;
-  try {
-    port = await findFreePort(DEFAULT_PORT).catch(() => DEFAULT_PORT);
-  } catch {
-    port = DEFAULT_PORT;
-  }
+  const healthy = await discoverHealthyBridge();
+  if (healthy) return { ...healthy, startedByUs: false };
+  const port = await freeSpawnPort();
   const { port: boundPort, pid } = await spawnDaemon(binary, port);
   return { host: HOST, port: boundPort, pid, startedByUs: true };
 }
 async function stopDaemon() {
   const state = readState();
-  if (!state?.pid) return;
+  if (!state?.pid || !pidAlive(state.pid)) return;
   try {
     process.kill(state.pid);
   } catch {
@@ -499,8 +528,9 @@ function freeModelList() {
   const merged = [...primary, ...extra];
   return merged.length > 0 ? merged : [...DEFAULT_FREE_MODELS];
 }
-function startFilterProxy(bridge, preferredPort = 0) {
+function startFilterProxy(bridge, onBridgeFailure, preferredPort = 0) {
   const { promise, resolve, reject } = Promise.withResolvers();
+  let target = bridge;
   const freeSet = () => FREE_ONLY ? new Set(freeModelList()) : null;
   const server = http.createServer((req, res) => {
     const allowed = freeSet();
@@ -533,6 +563,7 @@ function startFilterProxy(bridge, preferredPort = 0) {
         if (!requested || model === requested || !parsedBody) return raw;
         return Buffer.from(JSON.stringify({ ...parsedBody, model }));
       };
+      let healed = false;
       const attempt = (index, sameTries) => {
         if (index >= chain.length) {
           res.writeHead(503, { "content-type": "application/json" });
@@ -541,13 +572,30 @@ function startFilterProxy(bridge, preferredPort = 0) {
         }
         const model = chain[index];
         const payload = bodyFor(model);
-        const headers = { ...req.headers, host: `${bridge.host}:${bridge.port}` };
+        const headers = { ...req.headers, host: `${target.host}:${target.port}` };
         if (payload.length > 0) headers["content-length"] = String(payload.length);
         else delete headers["content-length"];
+        let reacted = false;
+        const failed = () => {
+          if (reacted) return;
+          reacted = true;
+          if (healed) {
+            attempt(index + 1, 0);
+            return;
+          }
+          healed = true;
+          onBridgeFailure().then(
+            (next) => {
+              if (next) target = next;
+              attempt(index, sameTries);
+            },
+            () => attempt(index + 1, 0)
+          );
+        };
         const upstream = http.request(
           {
-            host: bridge.host,
-            port: bridge.port,
+            host: target.host,
+            port: target.port,
             method: req.method,
             path: req.url,
             headers,
@@ -558,6 +606,7 @@ function startFilterProxy(bridge, preferredPort = 0) {
             if (status >= 200 && status < 300) {
               res.writeHead(status, { ...up.headers, "x-freepi-model": model });
               up.pipe(res);
+              up.on("error", () => res.destroy());
               return;
             }
             const parts = [];
@@ -576,11 +625,11 @@ function startFilterProxy(bridge, preferredPort = 0) {
               res.writeHead(status, { "content-type": "application/json", "x-freepi-model": model });
               res.end(text);
             });
-            up.on("error", () => attempt(index + 1, 0));
+            up.on("error", failed);
           }
         );
         upstream.on("timeout", () => upstream.destroy());
-        upstream.on("error", () => attempt(index + 1, 0));
+        upstream.on("error", failed);
         upstream.end(payload);
       };
       attempt(0, 0);
@@ -589,7 +638,9 @@ function startFilterProxy(bridge, preferredPort = 0) {
   const onListening = () => {
     const addr = server.address();
     const port = typeof addr === "object" && addr !== null ? addr.port : 0;
-    resolve({ url: `http://${HOST}:${port}/v1`, close: () => server.close() });
+    resolve({ url: `http://${HOST}:${port}/v1`, close: () => server.close(), setEndpoint: (next) => {
+      target = next;
+    } });
   };
   server.once("error", (err) => {
     if (err.code === "EADDRINUSE" && preferredPort !== 0) {
@@ -626,31 +677,64 @@ async function index_default(pi) {
     });
     pi.setStatus?.(EXTENSION_NAME, `${models.length} free models via ${baseUrl}`);
   };
+  let bringUpPromise = null;
+  const bringUp = (bin) => {
+    if (bringUpPromise) return bringUpPromise;
+    bringUpPromise = ensureDaemonRunning(bin).finally(() => {
+      bringUpPromise = null;
+    });
+    return bringUpPromise;
+  };
+  let healPromise = null;
+  let healBlockedUntil = 0;
+  const healBridge = () => {
+    if (healPromise) return healPromise;
+    if (Date.now() < healBlockedUntil || !binary) return Promise.resolve(null);
+    healPromise = bringUp(binary).then((info) => {
+      currentEndpoint = info;
+      proxy?.setEndpoint(info);
+      pi.setStatus?.(EXTENSION_NAME, `${currentModels.length} free models via ${proxyUrl}`);
+      return { host: info.host, port: info.port };
+    }).catch((err) => {
+      healBlockedUntil = Date.now() + 5e3;
+      pi.setStatus?.(EXTENSION_NAME, `freepi: bridge offline \u2014 ${String(err)}`);
+      return null;
+    }).finally(() => {
+      healPromise = null;
+    });
+    return healPromise;
+  };
   register(initialModels, proxyUrl);
   const startProxy = (endpoint) => {
-    startFilterProxy(endpoint, preferredProxyPort(endpoint)).then((started) => {
+    startFilterProxy(endpoint, healBridge, preferredProxyPort(endpoint)).then((started) => {
       proxy?.close();
-      proxy = { ...started, endpoint };
+      proxy = started;
       proxyUrl = started.url;
       register(currentModels, proxyUrl);
       syncModelsYml(proxyUrl);
-    }).catch(() => {
+    }).catch((err) => {
+      pi.setStatus?.(EXTENSION_NAME, `freepi: filter proxy gagal - ${String(err)}`);
     });
   };
   startProxy(currentEndpoint);
   const refresh = async () => {
     const bin = binary || await ensureBinaryInstalled().catch(() => null);
     if (!bin) throw new Error("freepi-bridge binary not available. Run `/freepi install` or install freepi-bridge manually.");
-    const info = await ensureDaemonRunning(bin);
-    const changed = info.port !== currentEndpoint.port || info.host !== currentEndpoint.host;
+    const info = await bringUp(bin);
     currentEndpoint = info;
-    if (changed) startProxy(info);
-    let models = await fetchModels(currentEndpoint);
+    proxy?.setEndpoint(info);
+    let models = [];
+    try {
+      models = await fetchModels(currentEndpoint);
+    } catch {
+      models = [];
+    }
     if (models.length === 0) models = loadModelsCache();
     currentModels = models;
     register(models, proxyUrl);
   };
-  void refresh().catch(() => {
+  void refresh().catch((err) => {
+    pi.setStatus?.(EXTENSION_NAME, `freepi: bridge offline \u2014 ${String(err)}`);
   });
   pi.registerCommand(EXTENSION_NAME, {
     description: "freepi-bridge daemon & provider: status | token | doctor | models | refresh-models | start | stop | restart | ads | logs | install | help",
@@ -741,7 +825,7 @@ async function index_default(pi) {
             break;
           }
           try {
-            const info = await ensureDaemonRunning(bin);
+            const info = await bringUp(bin);
             currentEndpoint = info;
             await refresh();
             ctx.ui.notify(`freepi daemon started on ${currentEndpoint.host}:${currentEndpoint.port} (pid ${info.pid})`, "info");
@@ -764,7 +848,7 @@ async function index_default(pi) {
             break;
           }
           try {
-            const info = await ensureDaemonRunning(bin);
+            const info = await bringUp(bin);
             currentEndpoint = info;
             await refresh();
             ctx.ui.notify(`freepi daemon restarted on ${currentEndpoint.host}:${currentEndpoint.port}`, "info");
