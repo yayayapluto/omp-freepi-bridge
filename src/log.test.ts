@@ -61,6 +61,25 @@ test("writes one JSONL entry with the required shape and redacted metadata", () 
 	}
 });
 
+test("scrubs URLs, userinfo, and inline credentials", () => {
+	const dir = freshDir();
+	const log = createLogger({ dir, plugin: "freepi", version: "0.2.0" });
+	log("info", "scrub_check", {
+		url: "https://user:pass@host/path?token=abc",
+		note: "note api_key=inline-secret here",
+		error: new Error("failed at https://user:pass@host/path?token=abc\nstack"),
+	});
+
+	const raw = fs.readFileSync(path.join(dir, "plugin.log"), "utf8");
+	const entry = JSON.parse(raw.trim());
+	expect(entry.url).toBe("https://host/path");
+	expect(entry.note).toBe("note api_key=[redacted] here");
+	expect(entry.error).toBe("failed at https://host/path");
+	for (const needle of ["user:pass", "token=abc", "inline-secret", "stack"]) {
+		expect(raw).not.toContain(needle);
+	}
+});
+
 test("OMP_PLUGIN_LOG=0 disables file logging", () => {
 	const dir = freshDir();
 	process.env.OMP_PLUGIN_LOG = "0";

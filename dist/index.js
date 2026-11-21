@@ -19,12 +19,18 @@ import path from "node:path";
 var SENSITIVE_KEY = /token|secret|password|authorization|cookie|api[-_]?key|credential|stack/i;
 var MAX_STRING = 200;
 var MAX_DEPTH = 4;
+var URL_USERINFO = /([a-z][a-z0-9+.-]*:\/\/)[^/@\s]+@/gi;
+var QUERY_OR_FRAGMENT = /[?#][^\s]*/g;
+var INLINE_CREDENTIAL = /\b(token|secret|password|authorization|cookie|api[-_]?key|credential)\s*[:=]\s*(?:Bearer\s+)?[^\s,;"']+/gi;
+function sanitizeLogString(value) {
+  const firstLine = value.split(/\r?\n/, 1)[0] ?? "";
+  return firstLine.replace(URL_USERINFO, "$1").replace(QUERY_OR_FRAGMENT, "").replace(INLINE_CREDENTIAL, "$1=[redacted]").slice(0, MAX_STRING);
+}
 function safeErrorMessage(error) {
-  const message = error instanceof Error ? error.message : String(error);
-  return message.split(/\r?\n/)[0].slice(0, MAX_STRING);
+  return sanitizeLogString(error instanceof Error ? error.message : String(error));
 }
 function safeValue(value, depth) {
-  if (typeof value === "string") return value.slice(0, MAX_STRING);
+  if (typeof value === "string") return sanitizeLogString(value);
   if (typeof value === "number") return Number.isFinite(value) ? value : void 0;
   if (typeof value === "boolean" || value === null) return value;
   if (value instanceof Error) return safeErrorMessage(value);

@@ -46,8 +46,8 @@ for the rest.
   URL in `~/.omp/agent/models.yml` never changes.
 - **`/freepi` command** — status, token, doctor, models, refresh-models, start/stop/restart, ads, logs, install, help.
 - **Local diagnostics**: appends structured JSONL events to `~/.freepi-bridge/plugin.log`. Set
-  `OMP_PLUGIN_LOG=0` to turn file logging off. Tokens, prompts, model output, headers, and URLs with
-  query strings are never written.
+  `OMP_PLUGIN_LOG=0` to turn file logging off. Tokens, prompts, model output, and headers are never
+  written; URL query strings and userinfo are stripped from any metadata strings.
 
 ## Requirements
 
@@ -181,6 +181,7 @@ discovery.
 | `FREEPI_PROXY_PORT` | daemon port + 1 | Preferred proxy port; falls back to an OS-assigned free port if taken |
 | `FREEPI_BASE_URL` | `https://api.freepi.ai` | FreePi API used for the model-tier lookup |
 | `FREEPI_FREE_ONLY` | `1` | `1` = register free models only and filter at the proxy; `0` = expose the full bridge catalog, no filtering, no `models.yml` sync |
+| `FREEPI_AUTO_AD` | `1` | Consumed by the `freepi-bridge` binary, not the extension; `0` disables automatic ad reporting |
 | `OMP_PLUGIN_LOG` | `1` | `0` disables all extension file logging; daemon logs are unaffected |
 
 ### `/freepi` commands
@@ -295,8 +296,8 @@ bun test           # JSONL shape, redaction, and token leakage
 npm run build      # esbuild → dist/index.js
 ```
 
-`bun test` is the only scripted check besides the build; a pre-commit hook runs it through
-`core.hooksPath=.githooks`. Smoke-test the bundle in OMP:
+`bun test` is the only scripted check besides the build. A pre-commit hook runs it. Activate the
+hook once per clone with `git config core.hooksPath .githooks`. Smoke-test the bundle in OMP:
 
 ```bash
 omp --no-extensions -e ./dist/index.js -p "Reply with exactly: ok"
@@ -325,8 +326,9 @@ Or link a local checkout into your OMP install and use `/freepi status` inside a
   and only ever sent as a Bearer header to `https://api.freepi.ai/client-version`. It is masked
   (first 6 + last 6 chars) in command output.
 - Extension logs hold event names, counts, statuses, model ids, and short error messages only.
-  Sensitive keys are dropped, long values are cut at 200 characters, stacks are omitted, and file
-  writes are disabled by `OMP_PLUGIN_LOG=0`.
+  Sensitive keys are dropped, URL query strings and userinfo are stripped, inline credential values
+  are redacted, long values are cut at 200 characters, stacks are omitted, and file writes are
+  disabled by `OMP_PLUGIN_LOG=0`.
 - When no binary exists, the extension downloads the upstream `freepi-bridge` v0.2.1 release asset
   and verifies it against the published `.sha256` file when available; a mismatch aborts with
   `freepi-bridge checksum mismatch`.
