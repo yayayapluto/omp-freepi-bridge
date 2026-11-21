@@ -4,7 +4,7 @@ import path from "node:path";
 export type PluginLogLevel = "info" | "warn" | "error";
 export type PluginLogger = (level: PluginLogLevel, event: string, meta?: Record<string, unknown>) => void;
 
-const SENSITIVE_KEY = /token|secret|password|authorization|cookie|api[-_]?key|credential|stack/i;
+const SENSITIVE_KEY = /token|secret|password|authorization|cookie|api[-_]?key|credential|stack|payload|prompt|profile|messages?|output|response|body|headers|text|content|completion|reasoning/i;
 const MAX_STRING = 200;
 const MAX_DEPTH = 4;
 const URL_USERINFO = /([a-z][a-z0-9+.-]*:\/\/)[^/@\s]+@/gi;

@@ -16,7 +16,7 @@ import path2 from "node:path";
 // src/log.ts
 import fs from "node:fs";
 import path from "node:path";
-var SENSITIVE_KEY = /token|secret|password|authorization|cookie|api[-_]?key|credential|stack/i;
+var SENSITIVE_KEY = /token|secret|password|authorization|cookie|api[-_]?key|credential|stack|payload|prompt|profile|messages?|output|response|body|headers|text|content|completion|reasoning/i;
 var MAX_STRING = 200;
 var MAX_DEPTH = 4;
 var URL_USERINFO = /([a-z][a-z0-9+.-]*:\/\/)[^/@\s]+@/gi;
