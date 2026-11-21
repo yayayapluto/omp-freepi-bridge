@@ -1,234 +1,335 @@
-# freepi-bridge OMP extension
+# omp-freepi-bridge
 
-Sambungkan akun **FreePi** ke pi/OMP sebagai provider model `freepi`. Ekstensi memakai ulang daemon [freepi-bridge](https://github.com/ihsan-ramadhan/freepi-bridge) yang sehat, atau menjalankannya sendiri bila tidak ada yang merespons. Proxy lokal menyaring model gratis, jadi tidak perlu API key.
+Free OpenAI-compatible model provider for [pi/OMP](https://github.com/oh-my-pi/oh-my-pi), served by
+the [freepi-bridge](https://github.com/ihsan-ramadhan/freepi-bridge) local daemon. The extension
+finds (or spawns) a healthy daemon on `127.0.0.1`, starts a small local filtering proxy in front of
+it, and registers a `freepi` provider — so OMP sessions can chat through your FreePi account without
+an API key. Only models that don't need premium credits are exposed, with an ordered fallback chain
+for the rest.
 
----
+## Table of Contents
 
-## Fitur utama
+- [Features](#features)
+- [Requirements](#requirements)
+- [Install](#install)
+  - [Step 1 — Get a FreePi token (prerequisite)](#step-1--get-a-freepi-token-prerequisite)
+  - [Step 2 — Install the plugin into OMP](#step-2--install-the-plugin-into-omp)
+  - [Step 3 — Verify it loaded](#step-3--verify-it-loaded)
+- [Usage](#usage)
+  - [Daily flow](#daily-flow)
+  - [Environment variables](#environment-variables)
+  - [`/freepi` commands](#freepi-commands)
+  - [Reading the status output](#reading-the-status-output)
+  - [Common prompts](#common-prompts)
+- [What it reads and touches](#what-it-reads-and-touches)
+- [Architecture](#architecture)
+- [Development](#development)
+- [Troubleshooting](#troubleshooting)
+- [Security notes](#security-notes)
+- [License](#license)
 
-- Memakai ulang daemon yang benar-benar sehat, lalu menjalankan daemon baru dengan port bebas bila perlu.
-- Menyaring model gratis dan mengurutkan fallback tanpa mengubah URL di `models.yml` saat pemulihan terjadi.
-- Mengganti endpoint daemon lewat `setEndpoint`, tanpa restart proxy.
-- Memulihkan koneksi saat request gagal, dengan retry model yang sama lalu fallback ke model berikutnya.
-- Menampilkan status `freepi: bridge offline ...` bila startup gagal, bukan gagal diam-diam.
+## Features
 
-## Teknologi
+- **`freepi` provider** — registers an `openai-completions` provider with OMP; all models report zero
+  cost, 200k context, 16,384 max output tokens, text+image input.
+- **Healthy-daemon reuse** — probes `FREEPI_BRIDGE_PORT`, `~/.freepi-bridge/state.json`, `8787`, and
+  `8788`–`8793` via `/health` in parallel (1.5 s per probe) and reuses the first daemon that answers.
+- **Self-spawning daemon** — if none is healthy, picks a genuinely free port and runs
+  `freepi-bridge start --bg --port <port> --bind 127.0.0.1` (15 s health timeout).
+- **Free-only filtering proxy** — a local HTTP proxy in front of the daemon serves only free models
+  on `GET /v1/models` and reroutes premium/unknown ids to the best free model on chat.
+- **Ordered fallback** — `429`/account-busy retries the same model up to 3 times (1.2 s, 2.4 s,
+  3.6 s); `403`/`408`/`409`/`425`/`429`/`500`/`502`/`503`/`504` move to the next free model. The
+  model actually used comes back in the `x-freepi-model` response header.
+- **Automatic healing** — one in-flight heal per failure burst (shared `Promise`, 5 s back-off after
+  a failed heal); the proxy's target endpoint is swapped via `setEndpoint` without a restart, so the
+  URL in `~/.omp/agent/models.yml` never changes.
+- **`/freepi` command** — status, token, doctor, models, refresh-models, start/stop/restart, ads,
+  logs, install, help.
 
-- TypeScript, dirakit dengan esbuild menjadi `dist/index.js`.
-- Berjalan sebagai ekstensi pi/OMP di runtime Node.js.
-- Memakai biner `freepi-bridge` dari `PATH`, lokasi instalasi yang dikenal, atau rilis GitHub `v0.2.1` yang diunduh ke `~/.omp-freepi-bridge/bin/`.
-- Berbicara dengan FreePi lewat API `https://api.freepi.ai`.
+## Requirements
 
-## Prasyarat
-
-- pi/OMP dengan perintah `omp` yang tersedia.
-- Akun FreePi dan token masuk. Cara mendapatkannya ada di bagian 1.
-- Akses ke GitHub bila biner `freepi-bridge` belum tersedia lokal dan perlu diunduh.
-
----
+- OMP (`omp` CLI) with plugin/extension support.
+- Node.js 22+ or Bun 1.1+ (OMP's runtime). The code uses `Promise.withResolvers`; there is no
+  `engines` field in `package.json`.
+- A FreePi account and token (see Step 1).
+- Network access to `https://api.freepi.ai` and `https://github.com` (GitHub only needed when no
+  `freepi-bridge` binary exists locally yet).
+- Windows or Linux/macOS (the download picks the matching release asset per platform/arch).
 
 ## Install
 
-Dari npm:
+### Step 1 — Get a FreePi token (prerequisite)
 
-```bash
-omp plugin install omp-freepi-bridge
-```
-
-Dari marketplace OMP:
-
-```bash
-omp plugin marketplace add yayayapluto/omp-freepi-bridge
-omp plugin install omp-freepi-bridge@omp-freepi-bridge
-```
-
-Dari sumber:
-
-```bash
-git clone https://github.com/yayayapluto/omp-freepi-bridge.git
-npm install && npm run build
-omp plugin install ./omp-freepi-bridge
-```
-
-Cek hasilnya:
-
-```bash
-omp plugin list | grep freepi
-```
-
-`npm i -g omp-freepi-bridge` hanya memasang paket ke npm dan tidak mendaftarkannya ke OMP. Gunakan `omp plugin install` supaya runtime memuat ekstensi ini.
-
-> Plugin terdaftar sebagai `omp-freepi-bridge` sesuai `package.json`, sama dengan nama repo.
-
-### Update
-
-```bash
-npm view omp-freepi-bridge version          # latest published
-omp plugin marketplace update omp-freepi-bridge
-omp plugin upgrade omp-freepi-bridge@omp-freepi-bridge
-```
-
----
-
-## 1. Dapatkan token FreePi (sekali per mesin)
+Sign in once per machine:
 
 ```bash
 npx free-pi-cli@latest
 ```
 
-Masuk dengan GitHub, lalu keluar. Token tersimpan di `~/.free-pi/agent/credentials.json`.
+Log in with GitHub, then quit. The token is saved to `~/.free-pi/agent/credentials.json`.
 
-Alternatif, menurut prioritas:
+Alternative token sources, in priority order (checked by `/freepi token`):
 
-| Sumber | Cara |
-|---|---|
-| Variabel lingkungan `FREEPI_TOKEN` | `set FREEPI_TOKEN=eyJ...` (Windows) / `export FREEPI_TOKEN=eyJ...` |
-| Berkas kredensial | `~/.free-pi/agent/credentials.json` dari perintah CLI di atas |
-| Konfigurasi daemon | `FREEPI_TOKEN=...` di `~/.freepi-bridge/config.env` |
+| Source | How |
+| --- | --- |
+| `FREEPI_TOKEN` environment variable | `set FREEPI_TOKEN=eyJ...` (Windows) / `export FREEPI_TOKEN=eyJ...` |
+| `~/.free-pi/agent/credentials.json` | written by the CLI above |
+| `~/.freepi-bridge/config.env` | a line `FREEPI_TOKEN=...` in the daemon config |
 
-Cek hasil deteksi: `/freepi token`
+### Step 2 — Install the plugin into OMP
 
----
+Pick one:
 
-## 2. Pakai model
+**From npm (published as `omp-freepi-bridge@0.1.1`):**
 
 ```bash
-omp launch --model freepi/particle -p "hello"
+omp plugin install omp-freepi-bridge
 ```
 
-Saat proses refresh latar belakang berjalan, ekstensi:
+**From the OMP marketplace:**
 
-1. mencari `freepi-bridge` di `PATH`, lalu mengunduh rilis yang cocok ke `~/.omp-freepi-bridge/bin/` bila belum ada;
-2. mengirim probe `/health` secara paralel ke `FREEPI_BRIDGE_PORT`, `state.port`, `8787`, dan `8788-8793`;
-3. memakai daemon sehat pertama yang menjawab `200`;
-4. bila semua kandidat mati, memilih port yang benar-benar bebas dari kandidat itu, menjalankan daemon dengan `--port` pilihan sendiri, lalu menunggu `/health` paling lama 15 detik;
-5. menyalakan proxy model gratis dan mendaftarkan provider `freepi` ke URL proxy tersebut.
-
-Daftar model yang tersedia: `/freepi models`
-
-### Hanya model gratis yang didaftarkan
-
-Sebagian model FreePi hanya bisa dipakai dengan kredit premium dan gagal seperti ini:
-
-```
-403 At capacity for free users. Available with premium credits: /buy-credits
+```bash
+omp plugin marketplace add yayayapluto/omp-freepi-bridge
+omp plugin install omp-freepi-bridge
 ```
 
-`/v1/models` dari bridge tidak membawa penanda tier. Ekstensi membaca `https://api.freepi.ai/client-version` dengan token Anda, menyimpan hanya entri yang `free === true`, lalu meng-cache hasilnya di `~/.freepi-bridge/free-models.json`.
+**From a local checkout:**
 
-pi/OMP tetap melakukan discovery dari endpoint provider, jadi menyaring daftar yang didaftarkan saja tidak cukup. Ekstensi memasang proxy lokal antara OMP dan daemon:
+```bash
+git clone https://github.com/yayayapluto/omp-freepi-bridge.git
+cd omp-freepi-bridge
+npm install && npm run build
+omp plugin link .
+```
 
-- `GET /v1/models` mengembalikan hanya model gratis, menurut urutan prioritas.
-- `POST /v1/chat/completions` memakai id yang diminta bila termasuk model gratis. Id premium atau id yang tidak dikenal mulai dari model gratis terbaik.
-- `429`, atau teks `concurrent` dan `one request at a time`, memicu retry model yang sama sampai 3 kali dengan jeda 1,2 detik, 2,4 detik, dan 3,6 detik.
-- `403`, `408`, `409`, `425`, `429`, `500`, `502`, `503`, dan `504` di luar pola sibuk di atas beralih ke model berikutnya bila rantai masih punya opsi.
-- Koneksi ke bridge yang gagal memicu pemulihan otomatis, dijelaskan di bagian [Recovery otomatis](#recovery-otomatis).
-- Model yang benar-benar dipakai dikirim kembali lewat header respons `x-freepi-model`.
+`npm i -g omp-freepi-bridge` only installs the npm package; use `omp plugin install` so the OMP
+runtime actually loads the extension.
 
-OMP juga menyimpan konfigurasi provider di `~/.omp/agent/models.yml`, yang dapat menimpa pendaftaran runtime. Saat proxy mulai dan `FREEPI_FREE_ONLY` bukan `0`, ekstensi menyamakan entri `freepi.baseUrl` dengan URL proxy. Jadi discovery lewat `omp models` dan chat lewat jalur yang sama. Pemulihan bridge tidak mengubah URL ini karena alamat proxy tetap sama.
+### Step 3 — Verify it loaded
 
-Jalankan `omp models refresh freepi` sekali setelah upgrade dari versi yang mengarah langsung ke daemon, karena OMP meng-cache daftar hasil discovery.
+```bash
+omp plugin list | grep freepi
+```
 
-Rantai fallback, dari terbaik ke terakhir, juga dipakai bila pencarian tier tidak tersedia:
+Then inside any OMP session type:
+
+```
+/freepi status
+```
+
+A healthy install reports something like:
+
+```text
+freepi 0.1.0: daemon online 127.0.0.1:8787 · models=4 · token=yes (~/.free-pi/agent/credentials.json) · binary=installed
+```
+
+## Usage
+
+### Daily flow
+
+1. Load OMP as usual. On startup the extension registers the `freepi` provider immediately from its
+   model cache (no network wait), then in the background finds or starts the daemon, starts the
+   filtering proxy, and re-registers the provider against the proxy URL.
+2. Use any free model directly:
+
+   ```bash
+   omp --model freepi/particle -p "hello"
+   ```
+
+3. If you ask for a premium id (or an unknown id), the proxy silently starts from the best free
+   model instead; check the `x-freepi-model` response header to see which model actually answered.
+4. If the daemon dies mid-session, the next request triggers an automatic heal — no manual
+   `freepi-bridge start` needed. Run `/freepi refresh-models` or `/freepi start` to force a re-check.
+5. List what's registered:
+
+   ```bash
+   omp models freepi
+   ```
+
+**Free models and the fallback chain.** The extension reads `https://api.freepi.ai/client-version`
+with your token to learn which models have `free === true` (the bridge's `/v1/models` carries no
+tier flag) and caches the result in `~/.freepi-bridge/free-models.json`. Registration, fallback, and
+the proxy's ordering all use one list, built best → least:
 
 1. `particle`
 2. `deepseek-v4.1-flash`
 3. `glm-5.3-flash`
 4. `deepseek-v4-flash`
 
-Bila ingin menampilkan semua model, misalnya setelah membeli kredit, tetapkan `FREEPI_FREE_ONLY=0`.
+When the tier lookup succeeds, a default id is kept only if it is marked free, and any other
+detected free id is appended after the four defaults. When detection is unavailable (no token, HTTP
+error, or empty result), the four defaults are used as-is. With `FREEPI_FREE_ONLY=0` no filtering
+happens and the full bridge catalog is registered.
 
----
+**`models.yml` sync.** OMP also caches provider config in `~/.omp/agent/models.yml`. While
+`FREEPI_FREE_ONLY` is not `0`, the extension rewrites the `freepi.baseUrl` entry to the proxy URL
+when the proxy starts, so discovery and chat both go through the filter. Healing never changes this
+URL — only the proxy's upstream target moves. After upgrading from a version that pointed
+`freepi` straight at the daemon, run `omp models refresh freepi` once to clear OMP's cached
+discovery.
 
-## Recovery otomatis
+### Environment variables
 
-**Health didahulukan.** Ekstensi tidak mempercayai `state.json` atau `pid` sebagai bukti bahwa daemon hidup. Keduanya hanya menjadi kandidat. Semua kandidat di-probe lewat `/health` secara paralel dengan batas 1,5 detik per permintaan.
+| Variable | Default | Effect |
+| --- | --- | --- |
+| `FREEPI_TOKEN` | unset | FreePi JWT; highest-priority token source |
+| `FREEPI_BRIDGE_BIN` | unset | Explicit path to the `freepi-bridge` binary |
+| `FREEPI_BRIDGE_PORT` | `8787` | First candidate port for daemon probe/spawn; the extension picks another free candidate if busy |
+| `FREEPI_PROXY_PORT` | daemon port + 1 | Preferred proxy port; falls back to an OS-assigned free port if taken |
+| `FREEPI_BASE_URL` | `https://api.freepi.ai` | FreePi API used for the model-tier lookup |
+| `FREEPI_FREE_ONLY` | `1` | `1` = register free models only and filter at the proxy; `0` = expose the full bridge catalog, no filtering, no `models.yml` sync |
+| `FREEPI_AUTO_AD` | `1` | Consumed by the `freepi-bridge` binary, not the extension; `0` disables automatic ad reporting |
 
-**Port bebas dipilih saat spawn.** Bila tidak ada kandidat yang sehat, ekstensi mencoba port kandidat satu per satu dan memilih yang benar-benar bisa dipakai. Daemon dijalankan dengan argumen `start --bg --port <port> --bind 127.0.0.1`. Proses `exit` dan `error` ditangkap, dan isi `stderr` disertakan dalam pesan error. Batas tunggunya 15 detik. Bila semua kandidat sibuk, proses gagal dengan pesan bahwa tidak ada port bebas untuk daemon.
+### `/freepi` commands
 
-**Endpoint bisa diganti tanpa restart.** Proxy lokal menyediakan `setEndpoint(next)`. Saat daemon baru ditemukan, ekstensi memanggil metode ini dan alamat tujuan proxy berubah langsung. Proses proxy tidak dihentikan, dan URL di `~/.omp/agent/models.yml` tidak perlu disunting ulang.
+| Command | Effect |
+| --- | --- |
+| `/freepi status` | Daemon liveness, model count, token source, binary version |
+| `/freepi token` | Masked token + source, or the sign-in guide |
+| `/freepi doctor` | Runs `freepi-bridge doctor --json` |
+| `/freepi models` | Lists registered model ids |
+| `/freepi refresh-models` | Re-fetches `/v1/models`, refreshes the free-tier cache, re-registers the provider |
+| `/freepi start` | Brings the daemon up (reuses a healthy one first) and refreshes models |
+| `/freepi stop` | Kills the daemon recorded in `~/.freepi-bridge/state.json` |
+| `/freepi restart` | Stop, then start |
+| `/freepi ads` | Prints the FreePi ad page URL (via `freepi-bridge ads`) |
+| `/freepi logs` | Last 8 lines of `~/.freepi-bridge/bridge.log` |
+| `/freepi install` | Downloads/verifies the `freepi-bridge` binary if not already present |
+| `/freepi help` | Command overview |
 
-**Pemulihan bersifat malas dan digabung.** Satu request memanggil `onBridgeFailure()` paling banyak satu kali. Permintaan yang terjadi bersamaan memakai `Promise` heal yang sama. Setelah pemulihan gagal, percobaan berikutnya ditahan selama 5 detik. Model yang sama dicoba ulang sekali sesudah upaya pemulihan. Bila masih gagal, rantai fallback lanjut ke model berikutnya.
+### Reading the status output
 
-**Startup gagal tetap terlihat.** Baik kegagalan refresh saat ekstensi dimuat maupun kegagalan heal memanggil `pi.setStatus` dengan awalan `freepi: bridge offline ...`. Pesan error dari spawn, termasuk `stderr`, ikut tampil sehingga penyebabnya bisa dilacak lewat status dan `/freepi logs`.
+`/freepi status` prints one line:
 
-Untuk memicu pemeriksaan ulang dari OMP, pakai `/freepi refresh-models` atau `/freepi start`. Menjalankan perintah `freepi-bridge start` secara manual tidak diperlukan untuk pemulihan rutin.
-
----
-
-## Perintah
-
-| Perintah | Fungsi |
-|---|---|
-| `/freepi status` | menampilkan status daemon, provider, dan token |
-| `/freepi token` | menampilkan sumber token atau panduan masuk |
-| `/freepi doctor` | menjalankan pemeriksaan `freepi-bridge doctor` |
-| `/freepi models` | mendaftar id model yang tersedia |
-| `/freepi refresh-models` | mengambil ulang `/v1/models` dan mendaftarkan provider kembali |
-| `/freepi start` | menjalankan daemon |
-| `/freepi stop` | menghentikan daemon |
-| `/freepi restart` | menghentikan lalu menjalankan daemon |
-| `/freepi ads` | menampilkan URL halaman iklan FreePi |
-| `/freepi logs` | menampilkan bagian akhir `~/.freepi-bridge/bridge.log` |
-| `/freepi install` | memasang atau memverifikasi biner `freepi-bridge` |
-
----
-
-## Variabel lingkungan
-
-| Variabel | Default | Efek |
-|---|---|---|
-| `FREEPI_TOKEN` | tidak diatur | JWT FreePi, prioritas tertinggi |
-| `FREEPI_BRIDGE_BIN` | tidak diatur | Path eksplisit ke biner `freepi-bridge` |
-| `FREEPI_BRIDGE_PORT` | `8787` | Kandidat port daemon untuk probe dan spawn. Bila sibuk, ekstensi memilih kandidat bebas lain. |
-| `FREEPI_PROXY_PORT` | port daemon `+ 1` | Port yang diinginkan untuk proxy. Bila sudah dipakai, proxy memakai port bebas sementara. |
-| `FREEPI_BASE_URL` | `https://api.freepi.ai` | API FreePi untuk pencarian tier model |
-| `FREEPI_FREE_ONLY` | `1` | `1` hanya mendaftarkan model gratis. `0` menampilkan semua model, tidak menyaring di proxy, dan tidak mengubah `models.yml`. |
-| `FREEPI_AUTO_AD` | `1` | Opsional, dipakai biner `freepi-bridge`, bukan ekstensi. `0` mematikan pelaporan iklan otomatis. Buka halaman `/ads` bila perlu. |
-| `FREEPI_AUTO_UPDATE` | tidak diatur oleh ekstensi | Opsional, dipakai biner `freepi-bridge`, bukan ekstensi. Ekstensi tidak membaca atau memberi nilai default. |
-
----
-
-## Pemecahan masalah
-
-| Gejala | Penanganan |
-|---|---|
-| Status `freepi: bridge offline ...` | Baca pesan error lengkapnya, cek `/freepi logs`, verifikasi `/freepi token` dan `/freepi install`, lalu jalankan `/freepi refresh-models`. Ekstensi sudah mencoba spawn dan heal otomatis, jadi tidak perlu `freepi-bridge start` manual. |
-| `freepi-bridge binary not found` | Jalankan `/freepi install` atau letakkan biner di `PATH`. |
-| `401` atau error login | Jalankan `npx free-pi-cli@latest` atau tetapkan `FREEPI_TOKEN`. |
-| Port sudah dipakai | Biasanya tidak perlu tindakan. Ekstensi memilih kandidat port bebas berikutnya. Tetapkan `FREEPI_BRIDGE_PORT` hanya bila ingin memaksa port tertentu. |
-| `403 ads_required` | Tetapkan `FREEPI_AUTO_AD=0` dan buka halaman `/ads` yang dicetak bridge. |
-| `403 At capacity for free users` | Model itu berbayar. Proxy akan mengalihkannya ke model gratis. `FREEPI_FREE_ONLY=0` mematikan penyaringan ini, jadi pakai id gratis bila opsi itu aktif. |
-| Katalog masih menampilkan model berbayar | Jalankan `omp models refresh freepi`, karena OMP meng-cache daftar hasil discovery. |
-| Daemon macet | Jalankan `/freepi restart`, lalu lihat log dengan `/freepi logs`. |
-| URL di status berubah dari `8788` | Itu hasil pilihan port saat proxy atau daemon tidak bisa memakai port bawaan. Perbarui perintah atau konfigurasi yang menempel pada URL lama. |
-
----
-
-## Cara kerja
-
-```
-pi/OMP ──▶ provider "freepi" (http://127.0.0.1:8788/v1, contoh default)
-                 │
-                 ▼
-          proxy filter model gratis ──▶ freepi-bridge daemon (127.0.0.1:8787, contoh default)
-                 │                        │
-                 │                        └─ state: ~/.freepi-bridge/state.json
-                 └─ daftar model gratis: ~/.freepi-bridge/free-models.json
-                    cache model: ~/.freepi-bridge/pi-models.json
-                    konfigurasi provider OMP: ~/.omp/agent/models.yml
+```text
+freepi 0.1.0: daemon <online host:port | offline> · models=<N> · token=<yes (source) | missing: /freepi token> · binary=<version | installed | missing>
 ```
 
-Pemuatan ekstensi tidak menunggu jaringan. Provider didaftarkan lebih dulu dari cache model, lalu `refresh()` berjalan di latar belakang supaya `omp models` tetap cepat.
+| Field | Meaning | What to do |
+| --- | --- | --- |
+| `daemon online 127.0.0.1:8787` | `/health` answered 200 | Nothing |
+| `daemon offline` | No healthy daemon at the current endpoint | Next request heals automatically; or `/freepi start` |
+| `models=4` | Models in the local cache (`~/.freepi-bridge/pi-models.json`) | `0` → `/freepi refresh-models` |
+| `token=yes (env FREEPI_TOKEN)` | Which token source was found | `missing` → `/freepi token` for the guide |
+| `binary=<version>` | First line of `freepi-bridge version` | `missing` → `/freepi install` |
 
-Ekstensi tidak menulis kredensial sendiri. Ekstensi hanya membaca lokasi token yang tercantum di atas dan menyerahkan proses masuk ke daemon.
+When a heal fails, the extension status shows `freepi: bridge offline — <error>` including any
+daemon stderr.
 
----
+### Common prompts
 
-## Pengembangan
+| You want | Do |
+| --- | --- |
+| See everything is alive | `/freepi status` |
+| Check token and sign-in options | `/freepi token` |
+| List usable models | `/freepi models` or `omp models freepi` |
+| Force a daemon re-check | `/freepi start` |
+| Diagnose the bridge itself | `/freepi doctor` |
+| See why requests fail | `/freepi logs` |
+
+## What it reads and touches
+
+| Path | Read/Write | Purpose |
+| --- | --- | --- |
+| `~/.free-pi/agent/credentials.json` | Read | FreePi token (written by `npx free-pi-cli@latest`) |
+| `~/.freepi-bridge/state.json` | Read | Daemon `port`/`pid` from a previous run |
+| `~/.freepi-bridge/config.env` | Read | `FREEPI_TOKEN=...` fallback |
+| `~/.freepi-bridge/bridge.log` | Read | Last 8 lines for `/freepi logs` |
+| `~/.freepi-bridge/pi-models.json` | Write | Cached provider model list (survives restarts) |
+| `~/.freepi-bridge/free-models.json` | Write | Cached free-model ids from the tier lookup |
+| `~/.freepi-bridge/bin/` | Write | Extracted binary when downloaded |
+| `~/.omp-freepi-bridge/bin/` | Write | Extension-managed binary install dir |
+| `~/.omp/agent/models.yml` | Write | Rewrites `freepi.baseUrl` to the proxy URL (only when `FREEPI_FREE_ONLY` ≠ `0` and a `freepi` block exists) |
+| `%LOCALAPPDATA%\Programs\freepi-bridge\` (Windows), `~/.local/bin/` (Unix) | Read | Known binary install locations checked before download |
+
+Network: HTTP to `127.0.0.1` (daemon + proxy), HTTPS to `https://api.freepi.ai/client-version` and
+`https://github.com/ihsan-ramadhan/freepi-bridge/releases` (binary download, tag `v0.2.1`). The
+extension opens one local listener — the filtering proxy on `127.0.0.1` — and never accepts
+connections from other hosts.
+
+## Architecture
+
+```text
+omp-freepi-bridge/
+├── src/index.ts                # whole extension: token, binary, daemon, proxy, provider, commands
+├── dist/index.js               # esbuild bundle loaded by OMP (built by `npm run build`)
+├── package.json                # pi.extensions → ./dist/index.js; build/prepublishOnly scripts
+├── .omp-plugin/marketplace.json# OMP marketplace entry
+├── NOTICE                      # MIT here, GPL-3.0-only for the upstream binary
+├── LICENSE                     # MIT
+└── README.md
+```
+
+Request flow:
+
+```text
+OMP session ──▶ provider "freepi" (http://127.0.0.1:<proxyPort>/v1)
+                     │
+                     ▼
+        filtering proxy (this extension)
+          ├─ GET /v1/models → free ids only, ordered, from pi-models.json
+          ├─ POST /v1/chat/completions
+          │    ├─ premium/unknown id → rewrite to best free model
+          │    ├─ 429 / "concurrent" → retry same model ≤3× (1.2/2.4/3.6 s)
+          │    ├─ 403/408/409/425/429/500/502/503/504 → next free model
+          │    └─ bridge failure → healBridge(): re-probe/spawn daemon, setEndpoint()
+          └─ success → passthrough + x-freepi-model header
+                     │
+                     ▼
+        freepi-bridge daemon (127.0.0.1:8787) ──▶ https://api.freepi.ai
+```
+
+Startup is non-blocking: the provider is registered synchronously from cache, the daemon bring-up
+and tier lookup run in the background, and failures surface as `freepi: bridge offline — …` status
+instead of stalling `omp models`.
+
+## Development
 
 ```bash
 npm install
-npm run build          # esbuild → dist/index.js
-omp plugin install .   # link local build
+npm run build        # esbuild → dist/index.js
 ```
+
+There is no test suite in this repository; the only scripted check is the build. Smoke-test the
+bundle in OMP:
+
+```bash
+omp --no-extensions -e ./dist/index.js -p "Reply with exactly: ok"
+```
+
+Or link a local checkout into your OMP install and use `/freepi status` inside a session.
+
+## Troubleshooting
+
+| Symptom | Cause | Fix |
+| --- | --- | --- |
+| `freepi: bridge offline — …` status | No healthy daemon and spawn failed (stderr is included) | Read the error, check `/freepi logs`, verify `/freepi token` and `/freepi install`, then `/freepi refresh-models` |
+| `freepi-bridge binary not available. Run '/freepi install' or install freepi-bridge manually.` | No binary on PATH or in known locations, and download failed | `/freepi install`, or set `FREEPI_BRIDGE_BIN`, or put `freepi-bridge` on PATH |
+| `401` / token missing | No FreePi token found | `npx free-pi-cli@latest`, or set `FREEPI_TOKEN` |
+| `freepi-bridge: tidak ada port bebas untuk daemon` | All candidate ports (8787–8793) are taken | Free a port or set `FREEPI_BRIDGE_PORT` |
+| `403 At capacity for free users` | Requested model needs premium credits | The proxy reroutes to a free model; with `FREEPI_FREE_ONLY=0` pick a free id yourself |
+| Catalog still shows paid models | OMP cached discovery from before the proxy was up | `omp models refresh freepi` |
+| `freepi: filter proxy gagal - …` status | Proxy could not bind | Usually transient; restart OMP, or set `FREEPI_PROXY_PORT` to a free port |
+| Daemon stuck | Daemon hung but process alive | `/freepi restart`, then `/freepi logs` |
+| Status URL shows a port other than 8788 | Port fallback picked a free port for daemon/proxy | Update anything pinned to the old URL; the proxy URL in `models.yml` is kept in sync automatically |
+
+## Security notes
+
+- The proxy and the daemon both bind to `127.0.0.1` only; nothing listens on external interfaces.
+- The FreePi token is read from the three documented locations, never written by this extension,
+  and only ever sent as a Bearer header to `https://api.freepi.ai/client-version`. It is masked
+  (first 6 + last 6 chars) in command output.
+- When no binary exists, the extension downloads the upstream `freepi-bridge` v0.2.1 release asset
+  and verifies it against the published `.sha256` file when available; a mismatch aborts with
+  `freepi-bridge checksum mismatch`.
+- The proxy forwards request headers to the local daemon, rewriting only `host` and
+  `content-length` when the model id changes.
+- The binary is executed as a separate process over local HTTP; it is not bundled, linked, or
+  redistributed by this package (see [NOTICE](NOTICE)).
+
+## License
+
+MIT for this extension — see [LICENSE](LICENSE). The upstream `freepi-bridge` binary it downloads
+and runs is licensed GPL-3.0-only by ihsan-ramadhan and is not distributed with this package; see
+[NOTICE](NOTICE). Not affiliated with FreePi.
