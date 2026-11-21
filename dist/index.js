@@ -7,31 +7,98 @@ var __require = /* @__PURE__ */ ((x) => typeof require !== "undefined" ? require
 
 // src/index.ts
 import { spawn } from "node:child_process";
-import fs from "node:fs";
+import fs2 from "node:fs";
 import http from "node:http";
 import net from "node:net";
 import os from "node:os";
+import path2 from "node:path";
+
+// src/log.ts
+import fs from "node:fs";
 import path from "node:path";
+var SENSITIVE_KEY = /token|secret|password|authorization|cookie|api[-_]?key|credential|stack/i;
+var MAX_STRING = 200;
+var MAX_DEPTH = 4;
+var URL_USERINFO = /([a-z][a-z0-9+.-]*:\/\/)[^/@\s]+@/gi;
+var QUERY_OR_FRAGMENT = /[?#][^\s]*/g;
+var INLINE_CREDENTIAL = /\b(token|secret|password|authorization|cookie|api[-_]?key|credential)\s*[:=]\s*(?:Bearer\s+)?[^\s,;"']+/gi;
+function sanitizeLogString(value) {
+  const firstLine = value.split(/\r?\n/, 1)[0] ?? "";
+  return firstLine.replace(URL_USERINFO, "$1").replace(QUERY_OR_FRAGMENT, "").replace(INLINE_CREDENTIAL, "$1=[redacted]").slice(0, MAX_STRING);
+}
+function safeErrorMessage(error) {
+  return sanitizeLogString(error instanceof Error ? error.message : String(error));
+}
+function safeValue(value, depth) {
+  if (typeof value === "string") return sanitizeLogString(value);
+  if (typeof value === "number") return Number.isFinite(value) ? value : void 0;
+  if (typeof value === "boolean" || value === null) return value;
+  if (value instanceof Error) return safeErrorMessage(value);
+  if (depth >= MAX_DEPTH) return void 0;
+  if (Array.isArray(value)) return value.map((item) => safeValue(item, depth + 1));
+  if (typeof value === "object") {
+    const out = {};
+    for (const [key, child] of Object.entries(value)) {
+      if (SENSITIVE_KEY.test(key)) continue;
+      const safe = safeValue(child, depth + 1);
+      if (safe !== void 0) out[key] = safe;
+    }
+    return out;
+  }
+  return void 0;
+}
+function redactLogMeta(meta) {
+  const out = {};
+  for (const [key, value] of Object.entries(meta)) {
+    if (SENSITIVE_KEY.test(key)) continue;
+    const safe = safeValue(value, 0);
+    if (safe !== void 0) out[key] = safe;
+  }
+  return out;
+}
+function createLogger(options) {
+  const file = path.join(options.dir, "plugin.log");
+  return (level, event, meta = {}) => {
+    if (process.env.OMP_PLUGIN_LOG === "0") return;
+    try {
+      const entry = {
+        ...redactLogMeta(meta),
+        ts: (/* @__PURE__ */ new Date()).toISOString(),
+        level,
+        event,
+        plugin: options.plugin,
+        version: options.version
+      };
+      fs.mkdirSync(options.dir, { recursive: true });
+      fs.appendFileSync(file, `${JSON.stringify(entry)}
+`);
+    } catch {
+    }
+  };
+}
+
+// src/index.ts
 var EXTENSION_NAME = "freepi";
-var EXTENSION_VERSION = "0.1.1";
+var EXTENSION_VERSION = "0.2.0";
 var HOST = "127.0.0.1";
 var DEFAULT_PORT = 8787;
 var REPO = "ihsan-ramadhan/freepi-bridge";
 var RELEASE_TAG = "v0.2.1";
-var STATE_DIR = path.join(os.homedir(), ".freepi-bridge");
-var STATE_FILE = path.join(STATE_DIR, "state.json");
-var CONFIG_ENV = path.join(STATE_DIR, "config.env");
-var MODELS_CACHE_FILE = path.join(STATE_DIR, "pi-models.json");
-var FREE_IDS_CACHE_FILE = path.join(STATE_DIR, "free-models.json");
+var STATE_DIR = path2.join(os.homedir(), ".freepi-bridge");
+var STATE_FILE = path2.join(STATE_DIR, "state.json");
+var CONFIG_ENV = path2.join(STATE_DIR, "config.env");
+var MODELS_CACHE_FILE = path2.join(STATE_DIR, "pi-models.json");
+var FREE_IDS_CACHE_FILE = path2.join(STATE_DIR, "free-models.json");
+var log = createLogger({ dir: STATE_DIR, plugin: EXTENSION_NAME, version: EXTENSION_VERSION });
 var FREEPI_BASE_URL = (process.env.FREEPI_BASE_URL || "https://api.freepi.ai").replace(/\/+$/, "");
 var FREE_ONLY = process.env.FREEPI_FREE_ONLY !== "0";
-var BIN_DIR = path.join(os.homedir(), ".omp-freepi-bridge", "bin");
-var MODELS_YML = path.join(os.homedir(), ".omp", "agent", "models.yml");
+var BIN_DIR = path2.join(os.homedir(), ".omp-freepi-bridge", "bin");
+var MODELS_YML = path2.join(os.homedir(), ".omp", "agent", "models.yml");
 function syncModelsYml(baseUrl) {
   if (!FREE_ONLY) return false;
   let text;
   try {
-    text = fs.readFileSync(MODELS_YML, "utf8");
+    text = fs2.readFileSync(MODELS_YML, "utf8");
   } catch {
     return false;
   }
@@ -45,13 +112,13 @@ function syncModelsYml(baseUrl) {
   if (lines[at].trim() === `baseUrl: ${baseUrl}`) return false;
   lines[at] = `    baseUrl: ${baseUrl}`;
   try {
-    fs.writeFileSync(MODELS_YML, lines.join("\n"));
+    fs2.writeFileSync(MODELS_YML, lines.join("\n"));
     return true;
   } catch {
     return false;
   }
 }
-var CREDENTIALS_FILE = path.join(os.homedir(), ".free-pi", "agent", "credentials.json");
+var CREDENTIALS_FILE = path2.join(os.homedir(), ".free-pi", "agent", "credentials.json");
 var MODEL_BASE = {
   api: "openai-completions",
   reasoning: true,
@@ -84,16 +151,16 @@ function readToken() {
     return { token: env.trim(), source: "env FREEPI_TOKEN", masked: maskToken(env.trim()) };
   }
   try {
-    if (fs.existsSync(CREDENTIALS_FILE)) {
-      const data = JSON.parse(fs.readFileSync(CREDENTIALS_FILE, "utf8"));
+    if (fs2.existsSync(CREDENTIALS_FILE)) {
+      const data = JSON.parse(fs2.readFileSync(CREDENTIALS_FILE, "utf8"));
       const tok = data?.token || data?.access_token || null;
       if (tok) return { token: tok, source: "~/.free-pi/agent/credentials.json", masked: maskToken(tok) };
     }
   } catch {
   }
   try {
-    if (fs.existsSync(CONFIG_ENV)) {
-      const text = fs.readFileSync(CONFIG_ENV, "utf8");
+    if (fs2.existsSync(CONFIG_ENV)) {
+      const text = fs2.readFileSync(CONFIG_ENV, "utf8");
       const m = text.match(/^\s*FREEPI_TOKEN\s*=\s*(.+?)\s*$/m);
       if (m?.[1]) return { token: m[1], source: "~/.freepi-bridge/config.env", masked: maskToken(m[1]) };
     }
@@ -105,15 +172,21 @@ function tokenSource() {
   const { token, source, masked } = readToken();
   return { has: Boolean(token), source, masked };
 }
+function tokenSourceKind(source) {
+  if (source.startsWith("env ")) return "env";
+  if (source.includes("credentials")) return "credentials";
+  if (source.includes("config.env")) return "config";
+  return "none";
+}
 function which(name) {
   const pathEnv = process.env.PATH || "";
-  const dirs = pathEnv.split(path.delimiter).filter(Boolean);
+  const dirs = pathEnv.split(path2.delimiter).filter(Boolean);
   const exts = isWindows() ? ["", ".exe", ".cmd", ".bat"] : [""];
   for (const dir of dirs) {
     for (const ext of exts) {
-      const cand = path.join(dir, name + ext);
+      const cand = path2.join(dir, name + ext);
       try {
-        if (fs.existsSync(cand) && fs.statSync(cand).isFile()) return cand;
+        if (fs2.existsSync(cand) && fs2.statSync(cand).isFile()) return cand;
       } catch {
       }
     }
@@ -125,11 +198,11 @@ function knownInstallLocations() {
   const cands = [];
   if (isWindows()) {
     const localAppData = process.env.LOCALAPPDATA || "";
-    cands.push(path.join(localAppData, "Programs", "freepi-bridge", name));
+    cands.push(path2.join(localAppData, "Programs", "freepi-bridge", name));
   } else {
-    cands.push(path.join(os.homedir(), ".local", "bin", name));
+    cands.push(path2.join(os.homedir(), ".local", "bin", name));
   }
-  cands.push(path.join(BIN_DIR, name));
+  cands.push(path2.join(BIN_DIR, name));
   return cands;
 }
 function resolveBinaryPath() {
@@ -138,7 +211,7 @@ function resolveBinaryPath() {
   if (fromPath) return fromPath;
   for (const c of knownInstallLocations()) {
     try {
-      if (fs.existsSync(c) && fs.statSync(c).isFile()) return c;
+      if (fs2.existsSync(c) && fs2.statSync(c).isFile()) return c;
     } catch {
     }
   }
@@ -153,7 +226,7 @@ function sha256OfFile(file) {
   return new Promise((resolve, reject) => {
     const crypto = __require("node:crypto");
     const hash = crypto.createHash("sha256");
-    const stream = fs.createReadStream(file);
+    const stream = fs2.createReadStream(file);
     stream.on("data", (d) => hash.update(d));
     stream.on("end", () => resolve(hash.digest("hex")));
     stream.on("error", reject);
@@ -198,28 +271,28 @@ async function ensureBinaryInstalled() {
   } catch {
   }
   const data = await fetchBytes(url);
-  fs.mkdirSync(BIN_DIR, { recursive: true });
+  fs2.mkdirSync(BIN_DIR, { recursive: true });
   if (isWindows()) {
-    const zipPath = path.join(BIN_DIR, asset);
-    fs.writeFileSync(zipPath, data);
+    const zipPath = path2.join(BIN_DIR, asset);
+    fs2.writeFileSync(zipPath, data);
     const { execSync } = __require("node:child_process");
     execSync(`powershell -NoProfile -Command "Expand-Archive -Path '${zipPath}' -DestinationPath '${BIN_DIR}' -Force"`, {
       stdio: "ignore"
     });
-    const exe = path.join(BIN_DIR, exeName());
-    fs.chmodSync(exe, 493);
+    const exe = path2.join(BIN_DIR, exeName());
+    fs2.chmodSync(exe, 493);
     if (sha) {
       const actual = await sha256OfFile(exe);
       if (actual !== sha) throw new Error(`freepi-bridge checksum mismatch: expected ${sha}, got ${actual}`);
     }
     return exe;
   } else {
-    const tarPath = path.join(BIN_DIR, asset);
-    fs.writeFileSync(tarPath, data);
+    const tarPath = path2.join(BIN_DIR, asset);
+    fs2.writeFileSync(tarPath, data);
     const { execSync } = __require("node:child_process");
     execSync(`tar -xzf '${tarPath}' -C '${BIN_DIR}'`, { stdio: "ignore" });
-    const bin = path.join(BIN_DIR, exeName());
-    fs.chmodSync(bin, 493);
+    const bin = path2.join(BIN_DIR, exeName());
+    fs2.chmodSync(bin, 493);
     if (sha) {
       const actual = await sha256OfFile(bin);
       if (actual !== sha) throw new Error(`freepi-bridge checksum mismatch: expected ${sha}, got ${actual}`);
@@ -229,7 +302,7 @@ async function ensureBinaryInstalled() {
 }
 function readState() {
   try {
-    const raw = fs.readFileSync(STATE_FILE, "utf8");
+    const raw = fs2.readFileSync(STATE_FILE, "utf8");
     const d = JSON.parse(raw);
     return typeof d === "object" && d !== null ? d : null;
   } catch {
@@ -405,14 +478,14 @@ function toProviderModel(m) {
 }
 function saveFreeIds(ids) {
   try {
-    fs.mkdirSync(path.dirname(FREE_IDS_CACHE_FILE), { recursive: true });
-    fs.writeFileSync(FREE_IDS_CACHE_FILE, JSON.stringify({ savedAt: Date.now(), ids }));
+    fs2.mkdirSync(path2.dirname(FREE_IDS_CACHE_FILE), { recursive: true });
+    fs2.writeFileSync(FREE_IDS_CACHE_FILE, JSON.stringify({ savedAt: Date.now(), ids }));
   } catch {
   }
 }
 function loadFreeIds() {
   try {
-    const d = JSON.parse(fs.readFileSync(FREE_IDS_CACHE_FILE, "utf8"));
+    const d = JSON.parse(fs2.readFileSync(FREE_IDS_CACHE_FILE, "utf8"));
     if (Array.isArray(d?.ids)) return d.ids.filter((id) => typeof id === "string");
   } catch {
   }
@@ -496,24 +569,26 @@ async function fetchModels(endpoint) {
   const all = await fetchBridgeModels(endpoint);
   if (!FREE_ONLY) {
     saveModelsCache(all);
+    log("info", "model_catalog_refresh", { bridge_models: all.length, registered: all.length, free_only: false });
     return all;
   }
   await fetchFreeModelIds(readToken().token);
   const byId = new Map(all.map((m) => [m.id, m]));
   const result = freeModelList().map((id) => byId.get(id) ?? { ...MODEL_BASE, id, name: id });
   saveModelsCache(result);
+  log("info", "model_catalog_refresh", { bridge_models: all.length, registered: result.length, free_only: true });
   return result;
 }
 function saveModelsCache(models) {
   try {
-    fs.mkdirSync(path.dirname(MODELS_CACHE_FILE), { recursive: true });
-    fs.writeFileSync(MODELS_CACHE_FILE, JSON.stringify({ savedAt: Date.now(), models }));
+    fs2.mkdirSync(path2.dirname(MODELS_CACHE_FILE), { recursive: true });
+    fs2.writeFileSync(MODELS_CACHE_FILE, JSON.stringify({ savedAt: Date.now(), models }));
   } catch {
   }
 }
 function loadModelsCache() {
   try {
-    const d = JSON.parse(fs.readFileSync(MODELS_CACHE_FILE, "utf8"));
+    const d = JSON.parse(fs2.readFileSync(MODELS_CACHE_FILE, "utf8"));
     if (Array.isArray(d?.models)) return d.models.filter((m) => typeof m?.id === "string");
   } catch {
   }
@@ -566,6 +641,7 @@ function startFilterProxy(bridge, onBridgeFailure, preferredPort = 0) {
       let healed = false;
       const attempt = (index, sameTries) => {
         if (index >= chain.length) {
+          log("warn", "chat_fallback_exhausted", { chain_length: chain.length });
           res.writeHead(503, { "content-type": "application/json" });
           res.end(JSON.stringify({ error: { message: "all free freepi models failed", type: "api_error" } }));
           return;
@@ -604,6 +680,7 @@ function startFilterProxy(bridge, onBridgeFailure, preferredPort = 0) {
           (up) => {
             const status = up.statusCode || 502;
             if (status >= 200 && status < 300) {
+              log("info", "chat_request_complete", { model, status, attempt: index + 1, same_retries: sameTries });
               res.writeHead(status, { ...up.headers, "x-freepi-model": model });
               up.pipe(res);
               up.on("error", () => res.destroy());
@@ -615,10 +692,12 @@ function startFilterProxy(bridge, onBridgeFailure, preferredPort = 0) {
               const text = Buffer.concat(parts).toString();
               const accountBusy = status === 429 || /concurrent|one request at a time/i.test(text);
               if (accountBusy && sameTries < 3) {
+                log("warn", "chat_retry_same_model", { status, attempt: index + 1, same_retries: sameTries + 1 });
                 setTimeout(() => attempt(index, sameTries + 1), 1200 * (sameTries + 1));
                 return;
               }
               if (RETRY_STATUS.has(status) && index + 1 < chain.length) {
+                log("warn", "chat_fallback", { status, next_attempt: index + 2, chain_length: chain.length });
                 attempt(index + 1, 0);
                 return;
               }
@@ -652,6 +731,20 @@ function startFilterProxy(bridge, onBridgeFailure, preferredPort = 0) {
   server.listen(preferredPort, HOST, onListening);
   return promise;
 }
+var COMMAND_ACTIONS = [
+  "status",
+  "token",
+  "doctor",
+  "models",
+  "refresh-models",
+  "start",
+  "stop",
+  "restart",
+  "ads",
+  "logs",
+  "install",
+  "help"
+];
 async function index_default(pi) {
   const state = readState();
   let currentEndpoint = { host: HOST, port: state?.port ?? DEFAULT_PORT };
@@ -660,6 +753,10 @@ async function index_default(pi) {
   const binary = resolveBinaryPath();
   const token = tokenSource();
   pi.on("session_start", (_event, ctx) => {
+    log("info", "session_start", {
+      auth_source: tokenSourceKind(tokenSource().source),
+      models: currentModels.length
+    });
     if (!token.has) ctx.ui.notify(`freepi: ${signInGuide().split("\n")[0]}`, "warning");
   });
   const cached = loadModelsCache();
@@ -690,13 +787,16 @@ async function index_default(pi) {
   const healBridge = () => {
     if (healPromise) return healPromise;
     if (Date.now() < healBlockedUntil || !binary) return Promise.resolve(null);
+    log("info", "daemon_heal_start", {});
     healPromise = bringUp(binary).then((info) => {
       currentEndpoint = info;
       proxy?.setEndpoint(info);
+      log("info", "daemon_heal_success", { port: info.port });
       pi.setStatus?.(EXTENSION_NAME, `${currentModels.length} free models via ${proxyUrl}`);
       return { host: info.host, port: info.port };
     }).catch((err) => {
       healBlockedUntil = Date.now() + 5e3;
+      log("error", "daemon_heal_failure", { reason: "bring_up_failed" });
       pi.setStatus?.(EXTENSION_NAME, `freepi: bridge offline \u2014 ${String(err)}`);
       return null;
     }).finally(() => {
@@ -712,8 +812,10 @@ async function index_default(pi) {
       proxyUrl = started.url;
       register(currentModels, proxyUrl);
       syncModelsYml(proxyUrl);
+      log("info", "filter_proxy_start", { models: currentModels.length });
     }).catch((err) => {
       pi.setStatus?.(EXTENSION_NAME, `freepi: filter proxy gagal - ${String(err)}`);
+      log("error", "filter_proxy_failure", { error: safeErrorMessage(err) });
     });
   };
   startProxy(currentEndpoint);
@@ -738,23 +840,11 @@ async function index_default(pi) {
   });
   pi.registerCommand(EXTENSION_NAME, {
     description: "freepi-bridge daemon & provider: status | token | doctor | models | refresh-models | start | stop | restart | ads | logs | install | help",
-    getArgumentCompletions: (prefix) => [
-      "status",
-      "token",
-      "doctor",
-      "models",
-      "refresh-models",
-      "start",
-      "stop",
-      "restart",
-      "ads",
-      "logs",
-      "install",
-      "help"
-    ].filter((s) => s.startsWith(prefix)).map((s) => ({ value: s, label: s })),
+    getArgumentCompletions: (prefix) => COMMAND_ACTIONS.filter((s) => s.startsWith(prefix)).map((s) => ({ value: s, label: s })),
     handler: async (args, ctx) => {
       const parts = String(args || "").trim().split(/\s+/);
       const sub = parts[0] || "status";
+      log("info", "command_invoked", { action: COMMAND_ACTIONS.includes(sub) ? sub : "unknown" });
       switch (sub) {
         case "status": {
           const alive = await healthz(currentEndpoint);
@@ -836,6 +926,7 @@ async function index_default(pi) {
         }
         case "stop": {
           await stopDaemon();
+          log("info", "daemon_stop", { result: "ok" });
           pi.setStatus(EXTENSION_NAME, void 0);
           ctx.ui.notify("freepi daemon stopped.", "info");
           break;
@@ -845,15 +936,18 @@ async function index_default(pi) {
           const bin = resolveBinaryPath() || await ensureBinaryInstalled().catch(() => null);
           if (!bin) {
             ctx.ui.notify("freepi-bridge binary not installed. Run `/freepi install`.", "error");
+            log("error", "daemon_restart_failure", { reason: "binary_missing" });
             break;
           }
           try {
             const info = await bringUp(bin);
             currentEndpoint = info;
             await refresh();
+            log("info", "daemon_restart", { port: currentEndpoint.port });
             ctx.ui.notify(`freepi daemon restarted on ${currentEndpoint.host}:${currentEndpoint.port}`, "info");
           } catch (err) {
             ctx.ui.notify(`freepi: restart failed \u2014 ${String(err)}`, "error");
+            log("error", "daemon_restart_failure", { reason: "bring_up_failed" });
           }
           break;
         }
@@ -868,9 +962,9 @@ async function index_default(pi) {
           break;
         }
         case "logs": {
-          const logPath = path.join(STATE_DIR, "bridge.log");
+          const logPath = path2.join(STATE_DIR, "bridge.log");
           try {
-            const lines = fs.readFileSync(logPath, "utf8").trim().split("\n").slice(-8).join("\n");
+            const lines = fs2.readFileSync(logPath, "utf8").trim().split("\n").slice(-8).join("\n");
             ctx.ui.notify(`freepi-bridge logs:
 ${lines}`, "info");
           } catch {

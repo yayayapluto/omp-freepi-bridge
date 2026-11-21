@@ -1,6 +1,6 @@
 {
 	"name": "omp-freepi-bridge",
-	"version": "0.1.1",
+	"version": "0.2.0",
 	"description": "Free OpenAI-compatible model provider for pi/OMP via the freepi-bridge local daemon",
 	"keywords": [
 		"pi-package",
@@ -29,6 +29,7 @@
 	],
 	"scripts": {
 		"build": "esbuild src/index.ts --bundle --platform=node --format=esm --outfile=dist/index.js --external:@earendil-works/pi-coding-agent --external:@earendil-works/pi-tui --external:@earendil-works/pi-ai --log-level=warning",
+		"test": "bun test",
 		"prepublishOnly": "npm run build"
 	},
 	"peerDependencies": {

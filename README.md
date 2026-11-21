@@ -44,8 +44,10 @@ for the rest.
 - **Automatic healing** — one in-flight heal per failure burst (shared `Promise`, 5 s back-off after
   a failed heal); the proxy's target endpoint is swapped via `setEndpoint` without a restart, so the
   URL in `~/.omp/agent/models.yml` never changes.
-- **`/freepi` command** — status, token, doctor, models, refresh-models, start/stop/restart, ads,
-  logs, install, help.
+- **`/freepi` command** — status, token, doctor, models, refresh-models, start/stop/restart, ads, logs, install, help.
+- **Local diagnostics**: appends structured JSONL events to `~/.freepi-bridge/plugin.log`. Set
+  `OMP_PLUGIN_LOG=0` to turn file logging off. Tokens, prompts, model output, and headers are never
+  written; URL query strings and userinfo are stripped from any metadata strings.
 
 ## Requirements
 
@@ -81,7 +83,7 @@ Alternative token sources, in priority order (checked by `/freepi token`):
 
 Pick one:
 
-**From npm (published as `omp-freepi-bridge@0.1.1`):**
+**From npm (published as `omp-freepi-bridge@0.2.0`):**
 
 ```bash
 omp plugin install omp-freepi-bridge
@@ -121,7 +123,7 @@ Then inside any OMP session type:
 A healthy install reports something like:
 
 ```text
-freepi 0.1.0: daemon online 127.0.0.1:8787 · models=4 · token=yes (~/.free-pi/agent/credentials.json) · binary=installed
+freepi 0.2.0: daemon online 127.0.0.1:8787 · models=4 · token=yes (~/.free-pi/agent/credentials.json) · binary=installed
 ```
 
 ## Usage
@@ -180,6 +182,7 @@ discovery.
 | `FREEPI_BASE_URL` | `https://api.freepi.ai` | FreePi API used for the model-tier lookup |
 | `FREEPI_FREE_ONLY` | `1` | `1` = register free models only and filter at the proxy; `0` = expose the full bridge catalog, no filtering, no `models.yml` sync |
 | `FREEPI_AUTO_AD` | `1` | Consumed by the `freepi-bridge` binary, not the extension; `0` disables automatic ad reporting |
+| `OMP_PLUGIN_LOG` | `1` | `0` disables all extension file logging; daemon logs are unaffected |
 
 ### `/freepi` commands
 
@@ -203,7 +206,7 @@ discovery.
 `/freepi status` prints one line:
 
 ```text
-freepi 0.1.0: daemon <online host:port | offline> · models=<N> · token=<yes (source) | missing: /freepi token> · binary=<version | installed | missing>
+freepi 0.2.0: daemon <online host:port | offline> · models=<N> · token=<yes (source) | missing: /freepi token> · binary=<version | installed | missing>
 ```
 
 | Field | Meaning | What to do |
@@ -236,6 +239,7 @@ daemon stderr.
 | `~/.freepi-bridge/state.json` | Read | Daemon `port`/`pid` from a previous run |
 | `~/.freepi-bridge/config.env` | Read | `FREEPI_TOKEN=...` fallback |
 | `~/.freepi-bridge/bridge.log` | Read | Last 8 lines for `/freepi logs` |
+| `~/.freepi-bridge/plugin.log` | Append | Structured extension events (JSONL), separate from the daemon's `bridge.log` |
 | `~/.freepi-bridge/pi-models.json` | Write | Cached provider model list (survives restarts) |
 | `~/.freepi-bridge/free-models.json` | Write | Cached free-model ids from the tier lookup |
 | `~/.freepi-bridge/bin/` | Write | Extracted binary when downloaded |
@@ -288,11 +292,12 @@ instead of stalling `omp models`.
 
 ```bash
 npm install
-npm run build        # esbuild → dist/index.js
+bun test           # JSONL shape, redaction, and token leakage
+npm run build      # esbuild → dist/index.js
 ```
 
-There is no test suite in this repository; the only scripted check is the build. Smoke-test the
-bundle in OMP:
+`bun test` is the only scripted check besides the build. A pre-commit hook runs it. Activate the
+hook once per clone with `git config core.hooksPath .githooks`. Smoke-test the bundle in OMP:
 
 ```bash
 omp --no-extensions -e ./dist/index.js -p "Reply with exactly: ok"
@@ -320,6 +325,10 @@ Or link a local checkout into your OMP install and use `/freepi status` inside a
 - The FreePi token is read from the three documented locations, never written by this extension,
   and only ever sent as a Bearer header to `https://api.freepi.ai/client-version`. It is masked
   (first 6 + last 6 chars) in command output.
+- Extension logs hold event names, counts, statuses, model ids, and short error messages only.
+  Sensitive keys are dropped, URL query strings and userinfo are stripped, inline credential values
+  are redacted, long values are cut at 200 characters, stacks are omitted, and file writes are
+  disabled by `OMP_PLUGIN_LOG=0`.
 - When no binary exists, the extension downloads the upstream `freepi-bridge` v0.2.1 release asset
   and verifies it against the published `.sha256` file when available; a mismatch aborts with
   `freepi-bridge checksum mismatch`.
