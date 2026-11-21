@@ -28,7 +28,7 @@ test("writes one JSONL entry with the required shape and redacted metadata", () 
 		password: "hunter2-should-not-appear",
 		Authorization: "Bearer secret-value",
 		nested: { credential: "nested-secret", count: 2 },
-		message: "x".repeat(250),
+		detail: "x".repeat(250),
 		stack: "Error: stack-leak",
 		error: new Error("error-message-leak\nat stack-leak"),
 	});
@@ -45,7 +45,8 @@ test("writes one JSONL entry with the required shape and redacted metadata", () 
 		version: "0.2.0",
 	});
 	expect(new Date(entry.ts).toISOString()).toBe(entry.ts);
-	expect(entry.message).toHaveLength(200);
+	expect(entry.detail).toHaveLength(200);
+	expect(entry.message).toBeUndefined();
 	expect(entry.nested).toEqual({ count: 2 });
 	expect(entry.error).toBe("error-message-leak");
 
@@ -76,6 +77,25 @@ test("scrubs URLs, userinfo, and inline credentials", () => {
 	expect(entry.note).toBe("note api_key=[redacted] here");
 	expect(entry.error).toBe("failed at https://host/path");
 	for (const needle of ["user:pass", "token=abc", "inline-secret", "stack"]) {
+		expect(raw).not.toContain(needle);
+	}
+});
+
+test("drops prompt and payload content keys", () => {
+	const dir = freshDir();
+	const log = createLogger({ dir, plugin: "freepi", version: "0.2.0" });
+	log("info", "content_guard", {
+		payload: { prompt: "secret prompt", messages: [{ role: "user", content: "hi" }] },
+		prompt: "another secret prompt",
+		status: 200,
+	});
+
+	const raw = fs.readFileSync(path.join(dir, "plugin.log"), "utf8");
+	const entry = JSON.parse(raw.trim());
+	expect(entry).toMatchObject({ event: "content_guard", status: 200 });
+	expect(entry.payload).toBeUndefined();
+	expect(entry.prompt).toBeUndefined();
+	for (const needle of ["secret prompt", "another secret prompt", "messages", "role", "user"]) {
 		expect(raw).not.toContain(needle);
 	}
 });
