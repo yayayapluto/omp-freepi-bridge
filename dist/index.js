@@ -13,7 +13,7 @@ import net from "node:net";
 import os from "node:os";
 import path from "node:path";
 var EXTENSION_NAME = "freepi";
-var EXTENSION_VERSION = "0.1.0";
+var EXTENSION_VERSION = "0.1.1";
 var HOST = "127.0.0.1";
 var DEFAULT_PORT = 8787;
 var REPO = "ihsan-ramadhan/freepi-bridge";
@@ -659,9 +659,9 @@ async function index_default(pi) {
   let proxy = null;
   const binary = resolveBinaryPath();
   const token = tokenSource();
-  if (!token.has) {
-    pi.ui.notify(`freepi: ${signInGuide().split("\n")[0]}`, "warning");
-  }
+  pi.on("session_start", (_event, ctx) => {
+    if (!token.has) ctx.ui.notify(`freepi: ${signInGuide().split("\n")[0]}`, "warning");
+  });
   const cached = loadModelsCache();
   const initialModels = cached.length > 0 ? cached : freeModelList().map((id) => ({ ...MODEL_BASE, id, name: id }));
   currentModels = initialModels;

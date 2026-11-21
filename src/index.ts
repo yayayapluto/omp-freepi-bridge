@@ -29,7 +29,7 @@ import path from "node:path";
 import type { ExtensionAPI, ProviderModelConfig } from "@earendil-works/pi-coding-agent";
 
 const EXTENSION_NAME = "freepi";
-const EXTENSION_VERSION = "0.1.0";
+const EXTENSION_VERSION = "0.1.1";
 const HOST = "127.0.0.1";
 const DEFAULT_PORT = 8787;
 const REPO = "ihsan-ramadhan/freepi-bridge";
@@ -783,10 +783,10 @@ export default async function (pi: ExtensionAPI): Promise<void> {
 	const binary = resolveBinaryPath();
 	const token = tokenSource();
 
-	// Startup token guidance (non-blocking, no crash if missing).
-	if (!token.has) {
-		pi.ui.notify(`freepi: ${signInGuide().split("\n")[0]}`, "warning");
-	}
+	// Load-time code may only register; UI lives on the session context.
+	pi.on("session_start", (_event, ctx) => {
+		if (!token.has) ctx.ui.notify(`freepi: ${signInGuide().split("\n")[0]}`, "warning");
+	});
 
 	const cached = loadModelsCache();
 	const initialModels = cached.length > 0 ? cached : freeModelList().map((id) => ({ ...MODEL_BASE, id, name: id }));
