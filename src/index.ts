@@ -27,9 +27,10 @@ import net from "node:net";
 import os from "node:os";
 import path from "node:path";
 import type { ExtensionAPI, ProviderModelConfig } from "@earendil-works/pi-coding-agent";
+import { createLogger, safeErrorMessage } from "./log";
 
 const EXTENSION_NAME = "freepi";
-const EXTENSION_VERSION = "0.1.1";
+const EXTENSION_VERSION = "0.2.0";
 const HOST = "127.0.0.1";
 const DEFAULT_PORT = 8787;
 const REPO = "ihsan-ramadhan/freepi-bridge";
@@ -41,6 +42,7 @@ const STATE_FILE = path.join(STATE_DIR, "state.json");
 const CONFIG_ENV = path.join(STATE_DIR, "config.env");
 const MODELS_CACHE_FILE = path.join(STATE_DIR, "pi-models.json");
 const FREE_IDS_CACHE_FILE = path.join(STATE_DIR, "free-models.json");
+const log = createLogger({ dir: STATE_DIR, plugin: EXTENSION_NAME, version: EXTENSION_VERSION });
 
 // Upstream catalog (carries the per-model "free" flag the bridge drops).
 const FREEPI_BASE_URL = (process.env.FREEPI_BASE_URL || "https://api.freepi.ai").replace(/\/+$/, "");
@@ -147,6 +149,12 @@ export function readToken(): { token: string | null; source: string; masked: str
 export function tokenSource(): { has: boolean; source: string; masked: string | null } {
 	const { token, source, masked } = readToken();
 	return { has: Boolean(token), source, masked };
+}
+function tokenSourceKind(source: string): "env" | "credentials" | "config" | "none" {
+	if (source.startsWith("env ")) return "env";
+	if (source.includes("credentials")) return "credentials";
+	if (source.includes("config.env")) return "config";
+	return "none";
 }
 
 // ── Binary resolution / download ------------------------------------------
@@ -578,6 +586,7 @@ export async function fetchModels(endpoint: Endpoint): Promise<ProviderModelConf
 	const all = await fetchBridgeModels(endpoint);
 	if (!FREE_ONLY) {
 		saveModelsCache(all);
+		log("info", "model_catalog_refresh", { bridge_models: all.length, registered: all.length, free_only: false });
 		return all;
 	}
 	// Best-effort tier refresh; freeModelList() falls back to the known-free
@@ -586,6 +595,7 @@ export async function fetchModels(endpoint: Endpoint): Promise<ProviderModelConf
 	const byId = new Map(all.map((m) => [m.id, m]));
 	const result = freeModelList().map((id) => byId.get(id) ?? { ...MODEL_BASE, id, name: id });
 	saveModelsCache(result);
+	log("info", "model_catalog_refresh", { bridge_models: all.length, registered: result.length, free_only: true });
 	return result;
 }
 
@@ -680,6 +690,7 @@ export function startFilterProxy(
 			let healed = false;
 			const attempt = (index: number, sameTries: number): void => {
 				if (index >= chain.length) {
+					log("warn", "chat_fallback_exhausted", { chain_length: chain.length });
 					res.writeHead(503, { "content-type": "application/json" });
 					res.end(JSON.stringify({ error: { message: "all free freepi models failed", type: "api_error" } }));
 					return;
@@ -722,6 +733,7 @@ export function startFilterProxy(
 					(up) => {
 						const status = up.statusCode || 502;
 						if (status >= 200 && status < 300) {
+							log("info", "chat_request_complete", { model, status, attempt: index + 1, same_retries: sameTries });
 							res.writeHead(status, { ...up.headers, "x-freepi-model": model });
 							up.pipe(res);
 							up.on("error", () => res.destroy());
@@ -734,10 +746,12 @@ export function startFilterProxy(
 							const text = Buffer.concat(parts).toString();
 							const accountBusy = status === 429 || /concurrent|one request at a time/i.test(text);
 							if (accountBusy && sameTries < 3) {
+								log("warn", "chat_retry_same_model", { status, attempt: index + 1, same_retries: sameTries + 1 });
 								setTimeout(() => attempt(index, sameTries + 1), 1_200 * (sameTries + 1));
 								return;
 							}
 							if (RETRY_STATUS.has(status) && index + 1 < chain.length) {
+								log("warn", "chat_fallback", { status, next_attempt: index + 2, chain_length: chain.length });
 								attempt(index + 1, 0);
 								return;
 							}
@@ -772,6 +786,20 @@ export function startFilterProxy(
 	server.listen(preferredPort, HOST, onListening);
 	return promise;
 }
+const COMMAND_ACTIONS = [
+	"status",
+	"token",
+	"doctor",
+	"models",
+	"refresh-models",
+	"start",
+	"stop",
+	"restart",
+	"ads",
+	"logs",
+	"install",
+	"help",
+];
 
 // ── Extension factory -------------------------------------------------------
 export default async function (pi: ExtensionAPI): Promise<void> {
@@ -785,6 +813,10 @@ export default async function (pi: ExtensionAPI): Promise<void> {
 
 	// Load-time code may only register; UI lives on the session context.
 	pi.on("session_start", (_event, ctx) => {
+		log("info", "session_start", {
+			auth_source: tokenSourceKind(tokenSource().source),
+			models: currentModels.length,
+		});
 		if (!token.has) ctx.ui.notify(`freepi: ${signInGuide().split("\n")[0]}`, "warning");
 	});
 
@@ -822,15 +854,18 @@ export default async function (pi: ExtensionAPI): Promise<void> {
 	const healBridge = (): Promise<Endpoint | null> => {
 		if (healPromise) return healPromise;
 		if (Date.now() < healBlockedUntil || !binary) return Promise.resolve(null);
+		log("info", "daemon_heal_start", {});
 		healPromise = bringUp(binary)
 			.then((info) => {
 				currentEndpoint = info;
 				proxy?.setEndpoint(info);
+				log("info", "daemon_heal_success", { port: info.port });
 				pi.setStatus?.(EXTENSION_NAME, `${currentModels.length} free models via ${proxyUrl}`);
 				return { host: info.host, port: info.port };
 			})
 			.catch((err) => {
 				healBlockedUntil = Date.now() + 5_000;
+				log("error", "daemon_heal_failure", { reason: "bring_up_failed" });
 				pi.setStatus?.(EXTENSION_NAME, `freepi: bridge offline — ${String(err)}`);
 				return null;
 			})
@@ -852,9 +887,11 @@ export default async function (pi: ExtensionAPI): Promise<void> {
 				proxyUrl = started.url;
 				register(currentModels, proxyUrl);
 				syncModelsYml(proxyUrl);
+				log("info", "filter_proxy_start", { models: currentModels.length });
 			})
 			.catch((err) => {
 				pi.setStatus?.(EXTENSION_NAME, `freepi: filter proxy gagal - ${String(err)}`);
+				log("error", "filter_proxy_failure", { error: safeErrorMessage(err) });
 			});
 	};
 
@@ -887,25 +924,13 @@ export default async function (pi: ExtensionAPI): Promise<void> {
 		description:
 			"freepi-bridge daemon & provider: status | token | doctor | models | refresh-models | start | stop | restart | ads | logs | install | help",
 		getArgumentCompletions: (prefix: string) =>
-			[
-				"status",
-				"token",
-				"doctor",
-				"models",
-				"refresh-models",
-				"start",
-				"stop",
-				"restart",
-				"ads",
-				"logs",
-				"install",
-				"help",
-			]
+			COMMAND_ACTIONS
 				.filter((s) => s.startsWith(prefix))
 				.map((s) => ({ value: s, label: s })),
 		handler: async (args: string, ctx) => {
 			const parts = String(args || "").trim().split(/\s+/);
 			const sub = parts[0] || "status";
+			log("info", "command_invoked", { action: COMMAND_ACTIONS.includes(sub) ? sub : "unknown" });
 
 			switch (sub) {
 				case "status": {
@@ -988,6 +1013,7 @@ export default async function (pi: ExtensionAPI): Promise<void> {
 				}
 				case "stop": {
 					await stopDaemon();
+					log("info", "daemon_stop", { result: "ok" });
 					pi.setStatus(EXTENSION_NAME, undefined);
 					ctx.ui.notify("freepi daemon stopped.", "info");
 					break;
@@ -997,15 +1023,18 @@ export default async function (pi: ExtensionAPI): Promise<void> {
 					const bin = resolveBinaryPath() || (await ensureBinaryInstalled().catch(() => null));
 					if (!bin) {
 						ctx.ui.notify("freepi-bridge binary not installed. Run `/freepi install`.", "error");
+					log("error", "daemon_restart_failure", { reason: "binary_missing" });
 						break;
 					}
 					try {
 						const info = await bringUp(bin);
 						currentEndpoint = info;
 						await refresh();
+						log("info", "daemon_restart", { port: currentEndpoint.port });
 						ctx.ui.notify(`freepi daemon restarted on ${currentEndpoint.host}:${currentEndpoint.port}`, "info");
 					} catch (err) {
 						ctx.ui.notify(`freepi: restart failed — ${String(err)}`, "error");
+						log("error", "daemon_restart_failure", { reason: "bring_up_failed" });
 					}
 					break;
 				}

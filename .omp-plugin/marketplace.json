@@ -8,7 +8,7 @@
     {
       "name": "omp-freepi-bridge",
       "source": "./",
-      "version": "0.1.1",
+      "version": "0.2.0",
       "description": "Uses a healthy freepi-bridge daemon or starts one when needed, exposes only credit-free models, reroutes premium ids, and heals the bridge automatically."
     }
   ]
